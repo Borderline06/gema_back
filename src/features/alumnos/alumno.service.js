@@ -152,7 +152,8 @@ export const alumnoService = {
           fecha_corte: fechaCorte,
           sede: h.canchas?.sedes?.nombre || h.canchas?.nombre || "CALLAO",
           // ✅ Formato: LUN 20:30 - 22:00
-          horario: `${diasMapa[h.dia_semana] || h.dia_semana} ${formatearHora(h.hora_inicio)} - ${formatearHora(h.hora_fin)}`
+          horario: `${diasMapa[h.dia_semana] || h.dia_semana} ${formatearHora(h.hora_inicio)} - ${formatearHora(h.hora_fin)}`,
+          esIndividual: ins.tipo_inscripcion === "INDIVIDUAL" ? true : false,
         };
       });
 
@@ -161,7 +162,7 @@ export const alumnoService = {
         nombre_completo: `${alumno.usuarios.nombres} ${alumno.usuarios.apellidos}`,
         dni: alumno.usuarios.numero_documento,
         contratos: inscripcionesProcesadas,
-        fecha_corte_principal: inscripcionesProcesadas[0]?.fecha_corte || null
+        fecha_corte_principal: inscripcionesProcesadas[0]?.fecha_corte || null,
       };
     });
   },
@@ -181,7 +182,7 @@ export const alumnoService = {
       throw new ApiError(e instanceof Error ? e.message : 'Error Interno', 500)
     }
   },
-   listarMisContactos: async (usuarioId) => {
+  listarMisContactos: async (usuarioId) => {
     return await prisma.alumnos_contactos.findMany({
       where: { alumno_id: usuarioId },
       orderBy: [{ es_principal: 'desc' }, { id: 'asc' }],
