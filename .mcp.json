@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "D:\\tools\\code-review-graph\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "code_review_graph",
+        "serve"
+      ],
+      "cwd": "D:\\Gema\\clubGemaBackend",
+      "type": "stdio"
+    }
+  }
+}
