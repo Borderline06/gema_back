@@ -460,11 +460,21 @@ export const usuarioService = {
     };
 
     if (sedeId) {
+      // Regex estricto, no parseInt: parseInt('1.9x') daría 1 y filtraría por
+      // la sede equivocada en silencio.
+      const sedeBruto = String(sedeId).trim();
+      if (!/^[0-9]+$/.test(sedeBruto) || Number(sedeBruto) <= 0) {
+        throw new ApiError('El parámetro sede_id debe ser un entero positivo', 400);
+      }
+      const sedeIdInt = Number(sedeBruto);
+      // 🎯 BL-008: solo las membresías ACTIVO cuentan para la pertenencia a una
+      // sede; el historial de sedes pasadas queda fuera del filtro.
       whereClause.alumnos = {
         inscripciones: {
           some: {
+            estado: 'ACTIVO',
             horarios_clases: {
-              canchas: { sede_id: Number.parseInt(sedeId) },
+              canchas: { sede_id: sedeIdInt },
             },
           },
         },

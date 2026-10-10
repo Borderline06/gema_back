@@ -155,18 +155,37 @@ export const historialAcademicoService = {
   //   la lógica de fechaCorte/vencida que antes vivía en el componente.
   // =================================================================
   obtenerResumenTablaAlumnos: async (sedeId) => {
-    try {
-      const sedeIdInt = sedeId ? parseInt(sedeId) : null;
+    // 🔒 BL-008: un sede_id inválido NO debe degradar silenciosamente a
+    // "listar todos los alumnos". Va fuera del try porque el catch de abajo
+    // reempaqueta cualquier error como 500 y se comería este 400.
+    let sedeIdInt = null;
+    if (sedeId !== null && sedeId !== undefined && sedeId !== '') {
+      // Regex estricto, no parseInt: parseInt('1.9x') daría 1 y filtraría por
+      // la sede equivocada en silencio.
+      const bruto = String(sedeId).trim();
+      if (!/^[0-9]+$/.test(bruto) || Number(bruto) <= 0) {
+        throw new ApiError('El parámetro sede_id debe ser un entero positivo', 400);
+      }
+      sedeIdInt = Number(bruto);
+    }
 
+    try {
       const whereClause = {
         activo: true,
         roles: { nombre: { equals: 'Alumno', mode: 'insensitive' } },
       };
 
       if (sedeIdInt) {
+        // 🎯 BL-008: la pertenencia a una sede se deriva SOLO de inscripciones
+        // ACTIVO — el historial de sedes pasadas (PENDIENTE_PAGO/FINALIZADO)
+        // queda fuera del filtro.
+        // 🎯 BL-009: "some" → subconsulta IN(SELECT…) sobre usuarios ⇒ 1 fila
+        // por alumno. Un alumno multi-sede entra por cualquiera de sus sedes y
+        // NO se duplica; no hace falta "distinct".
         whereClause.alumnos = {
           inscripciones: {
             some: {
+              estado: 'ACTIVO',
               horarios_clases: { canchas: { sede_id: sedeIdInt } },
             },
           },
@@ -192,11 +211,9 @@ export const historialAcademicoService = {
                 },
               },
               inscripciones: {
-                // 🎯 Si se filtra por sede, solo traemos inscripciones DE esa
-                // sede — evita mezclar sede/nivel de otra sede en el cálculo.
-                where: sedeIdInt
-                  ? { horarios_clases: { canchas: { sede_id: sedeIdInt } } }
-                  : undefined,
+                // 🎯 BL-009: ya NO recortamos por sede — necesitamos todas las
+                // inscripciones para poder listar todas las sedes activas del
+                // alumno. El acotado por sede se hace en memoria (ver mapeo).
                 orderBy: { fecha_inscripcion: 'desc' },
                 select: {
                   estado: true,
@@ -205,7 +222,11 @@ export const historialAcademicoService = {
                   horarios_clases: {
                     select: {
                       niveles_entrenamiento: { select: { nombre: true } },
-                      canchas: { select: { sedes: { select: { nombre: true } } } },
+                      canchas: {
+                        // sede_id es interno: acota el cálculo en memoria y no
+                        // se expone en el JSON de respuesta.
+                        select: { sede_id: true, sedes: { select: { nombre: true } } },
+                      },
                     },
                   },
                 },
@@ -226,12 +247,19 @@ export const historialAcademicoService = {
           .filter((c) => c.estado === 'PENDIENTE')
           .reduce((acc, c) => acc + Number(c.monto_final || 0), 0);
 
-        const esIndividual = inscripciones.some((i) =>
+        // 🎯 Vista acotada: con filtro de sede, los indicadores de vigencia y
+        // de plan individual se calculan solo con las inscripciones de ESA sede,
+        // para que la insignia "vencido" siga siendo accionable por sede.
+        const inscripcionesDeSede = sedeIdInt
+          ? inscripciones.filter((i) => i.horarios_clases?.canchas?.sede_id === sedeIdInt)
+          : inscripciones;
+
+        const esIndividual = inscripcionesDeSede.some((i) =>
           i.tipo_inscripcion === 'INDIVIDUAL' && i.estado === 'ACTIVO'
         );
 
         // --- Misma prioridad que antes: vigentes > activas-vencidas > última ---
-        const inscripcionesActivas = inscripciones.filter((i) => i.estado === 'ACTIVO');
+        const inscripcionesActivas = inscripcionesDeSede.filter((i) => i.estado === 'ACTIVO');
         const inscripcionesConCorte = inscripcionesActivas.map((i) => {
           const fechaCorte = calcularFechaCorte(i.fecha_inscripcion);
           return { ...i, __fechaCorte: fechaCorte, __vencida: estaVencida(fechaCorte) };
@@ -247,16 +275,24 @@ export const historialAcademicoService = {
         } else if (inscripcionesConCorte.length > 0) {
           inscripcionesAMostrar = inscripcionesConCorte;
           estadoVisual = 'ACTIVO';
-        } else if (inscripciones.length > 0) {
-          inscripcionesAMostrar = [inscripciones[0]];
-          estadoVisual = inscripciones[0].estado;
+        } else if (inscripcionesDeSede.length > 0) {
+          inscripcionesAMostrar = [inscripcionesDeSede[0]];
+          estadoVisual = inscripcionesDeSede[0].estado;
         }
 
+        // 🎯 BL-009: sedes/niveles salen de TODAS las inscripciones ACTIVO del
+        // alumno, sin importar el filtro aplicado — un alumno activo en varias
+        // sedes las declara todas. Fallback a inscripcionesAMostrar para no
+        // dejar sin sede al alumno sin ninguna ACTIVO (listado sin filtro:
+        // conserva el comportamiento actual).
+        const activasGlobales = inscripciones.filter((i) => i.estado === 'ACTIVO');
+        const paraEtiquetas = activasGlobales.length > 0 ? activasGlobales : inscripcionesAMostrar;
+
         const sedes = [...new Set(
-          inscripcionesAMostrar.map((i) => i.horarios_clases?.canchas?.sedes?.nombre).filter(Boolean)
+          paraEtiquetas.map((i) => i.horarios_clases?.canchas?.sedes?.nombre).filter(Boolean)
         )];
         const niveles = [...new Set(
-          inscripcionesAMostrar.map((i) => i.horarios_clases?.niveles_entrenamiento?.nombre).filter(Boolean)
+          paraEtiquetas.map((i) => i.horarios_clases?.niveles_entrenamiento?.nombre).filter(Boolean)
         )];
 
         const ultimaInsc = inscripcionesAMostrar[0];
@@ -275,7 +311,7 @@ export const historialAcademicoService = {
           estadoVisual,
           estaVencido: fechaCorte ? estaVencida(fechaCorte) : false,
           fechaCorte,
-          multiplesActivas: inscripcionesActivas.length > 1,
+          multiplesActivas: activasGlobales.length > 1,
 
           monto_pendiente: montoPendiente,
           esClaseUnica: esIndividual,
