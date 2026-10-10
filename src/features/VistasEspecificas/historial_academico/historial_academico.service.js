@@ -1,5 +1,15 @@
 import { prisma } from '../../../config/database.config.js';
 import { ApiError } from '../../../shared/utils/error.util.js';
+import { formatFechaEs } from '../../../shared/utils/date.util.js';
+
+// 🔥 DAYJS + LIMA: solo para fechas de tipo Timestamp, donde el formateo en
+// UTC puede correr un día (Lima es UTC-5). Las columnas @db.Date usan formatFechaEs.
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
+dayjs.extend(utc);
+dayjs.extend(timezone);
+const TZ_LIMA = 'America/Lima';
 
 
 const MAPA_DIAS = { 0: 'Domingo', 1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado', 7: 'Domingo' };
@@ -30,6 +40,19 @@ const calcularFechaCorte = (fechaInscripcion) => {
 const estaVencida = (fechaCorte) => {
   if (!fechaCorte) return false;
   return fechaCorte.getTime() < Date.now();
+};
+
+// 🎯 BL-013: cierre real del ciclo que aplica el cron VERDUGO
+// (inscripcion-cron.service.js). Ojo: NO es el mismo número que
+// DIAS_VIGENCIA_INSCRIPCION (29), que es la regla del badge de la tabla.
+const DIAS_CIERRE_CICLO = 30;
+
+// Suma en UTC: fecha_inicio_ciclo es @db.Date (medianoche UTC) y usar
+// setDate local desplazaría el día.
+const sumarDiasUTC = (fecha, dias) => {
+  const d = new Date(fecha);
+  d.setUTCDate(d.getUTCDate() + dias);
+  return d;
 };
 
 export const historialAcademicoService = {
@@ -469,6 +492,165 @@ export const historialAcademicoService = {
       if (error instanceof ApiError) throw error;
       console.error(`❌ [ERROR DETALLE ALUMNO] ID: ${alumnoId} | ${error.message}`);
       throw new ApiError('Error al obtener el detalle del alumno', 500);
+    }
+  },
+
+  // =================================================================
+  // 📤 BL-013: REPORTE EXPORTABLE DE ALUMNOS — 7 columnas exactas.
+  // Las llaves del objeto SON los nombres de columna del Excel: el
+  // frontend las genera con Object.keys (mismo contrato que el
+  // Reporte Maestro). No agregar llaves técnicas como "id".
+  // =================================================================
+  exportarReporteAlumnos: async (sedeId) => {
+    // 🔒 BL-008: mismo validador estricto que obtenerResumenTablaAlumnos.
+    // Fuera del try: el catch de abajo reempaqueta todo como 500 y se
+    // comería este 400.
+    let sedeIdInt = null;
+    if (sedeId !== null && sedeId !== undefined && sedeId !== '') {
+      const bruto = String(sedeId).trim();
+      if (!/^[0-9]+$/.test(bruto) || Number(bruto) <= 0) {
+        throw new ApiError('El parámetro sede_id debe ser un entero positivo', 400);
+      }
+      sedeIdInt = Number(bruto);
+    }
+
+    try {
+      const whereClause = {
+        activo: true,
+        roles: { nombre: { equals: 'Alumno', mode: 'insensitive' } },
+      };
+
+      if (sedeIdInt) {
+        // 🎯 BL-008: la pertenencia a la sede se deriva SOLO de inscripciones
+        // ACTIVO. 🎯 BL-009: "some" sobre usuarios ⇒ el alumno multi-sede
+        // entra por cualquiera de sus sedes y NO se duplica.
+        whereClause.alumnos = {
+          inscripciones: {
+            some: {
+              estado: 'ACTIVO',
+              horarios_clases: { canchas: { sede_id: sedeIdInt } },
+            },
+          },
+        };
+      }
+
+      // Una sola consulta: Prisma resuelve cada nivel anidado con un query
+      // constante por relación, no uno por alumno (sin N+1).
+      const usuarios = await prisma.usuarios.findMany({
+        where: whereClause,
+        select: {
+          nombres: true,
+          apellidos: true,
+          numero_documento: true,
+          fecha_nacimiento: true,
+          alumnos: {
+            select: {
+              inscripciones: {
+                // 🎯 BL-009: todas las inscripciones, sin recortar por sede.
+                orderBy: { fecha_inscripcion: 'desc' },
+                select: {
+                  estado: true,
+                  creado_en: true,
+                  horarios_clases: {
+                    select: {
+                      niveles_entrenamiento: { select: { nombre: true } },
+                      canchas: { select: { sedes: { select: { nombre: true } } } },
+                    },
+                  },
+                  inscripciones_deudas_link: {
+                    select: { fecha_inicio_ciclo: true, fecha_fin_ciclo: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { nombres: 'asc' },
+      });
+
+      const hoy = new Date();
+
+      return usuarios.map((user) => {
+        const inscripciones = user.alumnos?.inscripciones || [];
+        const activasGlobales = inscripciones.filter((i) => i.estado === 'ACTIVO');
+
+        // 🎯 BL-009: sede y nivel salen de TODAS las inscripciones ACTIVO.
+        // Fallback a la última inscripción para no dejar sin etiqueta al
+        // alumno que ya no tiene ninguna activa.
+        const paraEtiquetas = activasGlobales.length > 0
+          ? activasGlobales
+          : inscripciones.slice(0, 1);
+
+        const sedes = [...new Set(
+          paraEtiquetas.map((i) => i.horarios_clases?.canchas?.sedes?.nombre).filter(Boolean)
+        )];
+        const niveles = [...new Set(
+          paraEtiquetas.map((i) => i.horarios_clases?.niveles_entrenamiento?.nombre).filter(Boolean)
+        )];
+
+        // --- Fecha de inicio: primer ciclo histórico del alumno ---
+        // NO se usa fecha_inscripcion: se sobreescribe en cada renovación
+        // (ver inscripcion.service.js → actualizarFechaInicioPorPago).
+        const iniciosCiclo = inscripciones
+          .flatMap((i) => i.inscripciones_deudas_link || [])
+          .map((l) => l.fecha_inicio_ciclo)
+          .filter(Boolean)
+          .map((f) => new Date(f).getTime());
+
+        let fechaInicio = 'N/A';
+        if (iniciosCiclo.length > 0) {
+          fechaInicio = formatFechaEs(new Date(Math.min(...iniciosCiclo)));
+        } else {
+          // Fallback: creado_en nunca se pisa. Es Timestamp, se formatea en
+          // hora de Lima para no correr un día.
+          const altas = inscripciones
+            .map((i) => i.creado_en)
+            .filter(Boolean)
+            .map((f) => new Date(f).getTime());
+          if (altas.length > 0) {
+            fechaInicio = dayjs(Math.min(...altas)).tz(TZ_LIMA).format('DD/MM/YYYY');
+          }
+        }
+
+        // --- Fecha de corte: ciclo vigente de las inscripciones ACTIVO ---
+        // Base: la definición de "vigente" de dashboard.service.js, pero a
+        // propósito MÁS amplia — ver el filtro de abajo.
+        // fecha_fin_ciclo es NULL mientras el ciclo está abierto, así que se
+        // deriva fecha_inicio_ciclo + 30d: el cierre real del cron VERDUGO.
+        const cortesVigentes = activasGlobales
+          .flatMap((i) => i.inscripciones_deudas_link || [])
+          .filter((l) => {
+            if (!l.fecha_inicio_ciclo) return false;
+            // 🎯 BL-013: los ciclos FUTUROS ya prepagados cuentan como tiempo
+            // vigente para el negocio (una renovación pagada por adelantado), así
+            // que NO se excluyen por fecha_inicio_ciclo > hoy. Aquí divergimos de
+            // dashboard.service.js, que sí los descarta. Solo se descartan los
+            // ciclos ya cerrados en el pasado.
+            return l.fecha_fin_ciclo === null || new Date(l.fecha_fin_ciclo) >= hoy;
+          })
+          .map((l) => (l.fecha_fin_ciclo
+            ? new Date(l.fecha_fin_ciclo).getTime()
+            : sumarDiasUTC(l.fecha_inicio_ciclo, DIAS_CIERRE_CICLO).getTime()));
+
+        // Multi-sede: el corte más lejano = hasta cuándo está cubierto.
+        const fechaCorte = cortesVigentes.length > 0
+          ? formatFechaEs(new Date(Math.max(...cortesVigentes)))
+          : 'N/A';
+
+        return {
+          'Nombre': `${user.nombres} ${user.apellidos}`.trim(),
+          'DNI': user.numero_documento || 'N/A',
+          'Fecha de cumpleaños': formatFechaEs(user.fecha_nacimiento),
+          'Fecha de inicio': fechaInicio,
+          'Fecha de corte': fechaCorte,
+          'Sede': sedes.length > 0 ? sedes.join(', ') : 'N/A',
+          'Nivel': niveles.length > 0 ? niveles.join(', ') : 'N/A',
+        };
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      console.error(`❌ [ERROR EXPORT ALUMNOS] Sede: ${sedeId} | ${error.message}`);
+      throw new ApiError('Error al generar el reporte de alumnos', 500);
     }
   },
 

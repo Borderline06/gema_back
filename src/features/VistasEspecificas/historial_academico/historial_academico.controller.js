@@ -32,6 +32,22 @@ export const historialAcademicoController = {
     }
   },
 
+  // 📤 BL-013: reporte exportable de alumnos (7 columnas para el Excel)
+  exportarReporteAlumnos: async (req, res, next) => {
+    try {
+      const { sede_id } = req.query;
+      const data = await historialAcademicoService.exportarReporteAlumnos(sede_id || null);
+
+      return res.status(200).json({
+        success: true,
+        data,
+        message: 'Reporte de alumnos generado correctamente'
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
   // Se mantiene por compatibilidad, aunque la tabla ya no lo necesite aparte
   getFlagsIndividualPorSede: async (req, res, next) => {
     try {
