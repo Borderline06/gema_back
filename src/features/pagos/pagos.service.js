@@ -6,6 +6,8 @@ import * as Logic from './logic/pagos.logic.js';
 import * as Utils from './utils/pagos.util.js';
 import { notificacionesService } from '../notificaciones/notificaciones.service.js';
 import { inscripcionService } from '../inscripciones/inscripcion.service.js';
+// 🎯 BL-001: una sola definición de "es individual" en todo el backend.
+import { esIndividual } from '../../shared/utils/tipo-inscripcion.util.js';
 
 export const pagosService = {
   // 1. REGISTRAR EL PAGO (Integrado con Cloudinary 🚀)
@@ -172,7 +174,11 @@ export const pagosService = {
             },
           });
 
-          if (insc.tipo_inscripcion === 'INDIVIDUAL') {
+          // 🚩 BL-001: antes era una comparación estricta contra el string.
+          // esIndividual() tolera NULL, minúsculas y espacios, y es la misma
+          // definición que usan ahora los crons, el cambio de horario y la
+          // guardia de generarClasesFuturas.
+          if (esIndividual(insc)) {
             await asistenciaService.generarClaseUnica(tx, {
               inscripcion_id: insc.id,
               dia_semana: insc.horarios_clases.dia_semana,
@@ -189,6 +195,9 @@ export const pagosService = {
             usuario_admin_id: Number.parseInt(usuario_admin_id),
             coordinador_id: insc.horarios_clases.coordinador_id,
             fecha_inicio: insc.fecha_inscripcion,
+            // 🚩 BL-001: ya tenemos la fila, así que le ahorramos la consulta a
+            // la guardia de tipo de generarClasesFuturas.
+            tipo_inscripcion: insc.tipo_inscripcion,
           });
         }
       }

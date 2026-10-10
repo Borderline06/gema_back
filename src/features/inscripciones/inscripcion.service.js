@@ -21,6 +21,13 @@ import {
   parsearMesAnio,
   rangoMesUTC,
 } from '../../shared/utils/ciclo.util.js';
+// 🎯 BL-001 / BL-003
+import {
+  TIPO_INSCRIPCION,
+  esIndividual,
+  whereTipoInscripcion,
+} from '../../shared/utils/tipo-inscripcion.util.js';
+import { calcularPrimeraFechaClase } from '../../shared/utils/clase-fecha.util.js';
 
 // 🔥 IMPORTAMOS DAYJS Y CONFIGURAMOS LIMA PARA LOS LOGS 🔥
 import dayjs from 'dayjs';
@@ -89,6 +96,13 @@ export const inscripcionService = {
               estado: 'PENDIENTE_PAGO',
               fecha_inscripcion: inicioReal,
               fecha_inscripcion_original: inicioReal,
+              // 🚩 BL-001: explícito en vez de depender del @default del schema.
+              // Depender del default es lo que hacía que un `create` que omite
+              // el campo (como el de updateInscripcion) degradara una
+              // INDIVIDUAL a REGULAR en silencio. Además, las filas con
+              // tipo_inscripcion = NULL no matchean el filtro estricto de
+              // horario.service.js -> getHorariosByLevel.
+              tipo_inscripcion: TIPO_INSCRIPCION.REGULAR,
             },
             include: { horarios_clases: true }
           });
@@ -199,10 +213,13 @@ export const inscripcionService = {
     const { inicio, fin } = Utils.calcularRangoRenovacion(diasAnticipacion);
 
     return await prisma.$transaction(async (tx) => {
+      // 🚩 BL-001: una INDIVIDUAL no se renueva. Antes entraba al barrido por
+      // filtrar solo por estado, y se le generaba deuda de renovación mensual.
       const candidatos = await tx.inscripciones.findMany({
         where: {
           estado: 'ACTIVO',
           fecha_inscripcion: { gte: inicio, lte: fin },
+          ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR),
         },
         distinct: ['alumno_id'],
       });
@@ -216,8 +233,15 @@ export const inscripcionService = {
         if (await Validators.existeRenovacionReciente(tx, alumnoId, inicio)) continue;
 
         // 1. Contamos cuántas clases reales tiene el alumno activas
+        // 🚩 BL-001: excluir INDIVIDUALes acá es CRÍTICO para el cobro. Sin
+        // esto, un alumno con 2 horarios regulares + 1 clase suelta activa
+        // buscaba el plan de cantidad_clases_semanal: 3 y se le cobraba de más.
         const totalCursosActivos = await tx.inscripciones.count({
-          where: { alumno_id: alumnoId, estado: 'ACTIVO' },
+          where: {
+            alumno_id: alumnoId,
+            estado: 'ACTIVO',
+            ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR),
+          },
         });
 
         if (totalCursosActivos === 0) continue;
@@ -765,6 +789,55 @@ export const inscripcionService = {
       const yaExiste = inscTotales.some(i => i.horario_id === horarioId)
       if (yaExiste) throw new ApiError('El horario destino ya pertenece a una inscripción del alumno.', 400);
 
+      // 🚩 BL-001: el link anterior se lee ANTES de tocar nada, y se comprueba
+      // que exista. Antes se accedía a [0] más abajo sin guardia: una
+      // inscripción sin link (p. ej. tras limpiarReservasZombies) reventaba con
+      // TypeError y el controlador devolvía un 500 genérico.
+      const linkAnterior = insc.inscripciones_deudas_link[0];
+      if (!linkAnterior) {
+        throw new ApiError(
+          'La inscripción no tiene un ciclo de deuda vinculado; no se puede cambiar de horario.',
+          409
+        );
+      }
+
+      // 👮‍♂️ BL-003: aforo del horario DESTINO. Antes no se validaba, así que un
+      // admin podía mover un alumno a un horario ya agotado.
+      const paramZ = await tx.parametros_sistema.findUnique({ where: { clave: 'TIEMPO_LIMITE_RESERVA_MIN' } });
+      const fechaLimiteZombie = new Date(Date.now() - (paramZ ? parseInt(paramZ.valor) : 20) * 60 * 1000);
+
+      // validarAforoHorario lanza un Error plano (sin statusCode) y el
+      // controlador de este endpoint mapea eso a 500. Como la validación de
+      // aforo es NUEVA acá, un horario agotado se vería como un fallo de
+      // servidor, así que la reempaquetamos como 409 de negocio. El validador
+      // se deja intacto porque lo comparten otros 3 llamadores.
+      let horarioDestino;
+      try {
+        horarioDestino = await Validators.validarAforoHorario(tx, horarioId, fechaLimiteZombie);
+      } catch (e) {
+        if (e instanceof ApiError) throw e;
+        throw new ApiError(e.message, 409);
+      }
+
+      // 🎯 BL-001: si la inscripción es INDIVIDUAL, resolvemos la fecha de su
+      // única clase en el horario destino y la validamos como en la venta.
+      const esInscripcionIndividual = esIndividual(insc);
+      let fechaClaseDestino = null;
+
+      if (esInscripcionIndividual) {
+        fechaClaseDestino = calcularPrimeraFechaClase(
+          insc.fecha_inscripcion_original,
+          horarioDestino.dia_semana
+        );
+        if (!fechaClaseDestino) {
+          throw new ApiError(
+            '⛔ No se pudo determinar la fecha de la clase en el horario destino.',
+            400
+          );
+        }
+        await Validators.validarFechaNoFeriado(tx, fechaClaseDestino);
+      }
+
       const count = await asistenciaService.eliminarClases(tx, insc.id, insc.fecha_inscripcion_original);
       console.log(`Se eliminaron ${count} registros de asistencia.`)
 
@@ -787,22 +860,29 @@ export const inscripcionService = {
           actualizado_en: new Date(),
           creado_en: insc.creado_en,
           id_grupo_transaccion: insc.id_grupo_transaccion,
+          // 🚩 BL-001 (FIX CENTRAL): antes este create NO copiaba el tipo, así
+          // que la nueva inscripción caía al @default('REGULAR') del schema y
+          // una clase suelta se convertía en membresía mensual — y acto seguido
+          // recibía 30 días de clases.
+          tipo_inscripcion: insc.tipo_inscripcion,
         },
         include: {
           horarios_clases: true
         }
       })
 
-      // 🚩 guardamos referencia al link anterior para copiar su vigencia
-      const linkAnterior = insc.inscripciones_deudas_link[0];
-
       await tx.inscripciones_deudas_link.create({
         data: {
           inscripcion_id: createdInsc.id,
           cuenta_id: linkAnterior.cuenta_id,
           monto_asignado: Number(linkAnterior.monto_asignado),
-          fecha_inicio_ciclo: linkAnterior.fecha_inicio_ciclo, // 🚩 NUEVO: conserva la vigencia real del ciclo
-          fecha_fin_ciclo: linkAnterior.fecha_fin_ciclo,        // 🚩 NUEVO: si estaba abierto sigue abierto, si estaba cerrado sigue cerrado
+          // 🚩 REGULAR: conserva la vigencia real del ciclo (si estaba abierto
+          // sigue abierto, si estaba cerrado sigue cerrado).
+          // 🚩 BL-001 INDIVIDUAL: el "ciclo" es el día de la clase, y el
+          // horario destino puede moverla, así que se recalcula en vez de
+          // copiarse.
+          fecha_inicio_ciclo: esInscripcionIndividual ? fechaClaseDestino : linkAnterior.fecha_inicio_ciclo,
+          fecha_fin_ciclo: esInscripcionIndividual ? fechaClaseDestino : linkAnterior.fecha_fin_ciclo,
         }
       })
 
@@ -814,13 +894,25 @@ export const inscripcionService = {
       })
 
       if (createdInsc.estado === 'ACTIVO') {
-        await asistenciaService.generarClasesFuturas(tx, {
-          inscripcion_id: createdInsc.id,
-          dia_semana: createdInsc.horarios_clases.dia_semana,
-          usuario_admin_id: Number.parseInt(adminId),
-          coordinador_id: createdInsc.horarios_clases.coordinador_id,
-          fecha_inicio: createdInsc.fecha_inscripcion,
-        })
+        // 🎯 BL-001: bifurcación por tipo. Antes se llamaba siempre a
+        // generarClasesFuturas, generándole 30 días a las clases sueltas.
+        if (esInscripcionIndividual) {
+          await asistenciaService.generarClaseUnica(tx, {
+            inscripcion_id: createdInsc.id,
+            dia_semana: createdInsc.horarios_clases.dia_semana,
+            coordinador_id: createdInsc.horarios_clases.coordinador_id,
+            fecha_inicio: createdInsc.fecha_inscripcion,
+          })
+        } else {
+          await asistenciaService.generarClasesFuturas(tx, {
+            inscripcion_id: createdInsc.id,
+            dia_semana: createdInsc.horarios_clases.dia_semana,
+            usuario_admin_id: Number.parseInt(adminId),
+            coordinador_id: createdInsc.horarios_clases.coordinador_id,
+            fecha_inicio: createdInsc.fecha_inscripcion,
+            tipo_inscripcion: createdInsc.tipo_inscripcion,
+          })
+        }
 
         const hoy = new Date()
         hoy.setHours(12, 0, 0, 0)
@@ -912,7 +1004,32 @@ export const inscripcionService = {
         ? dayjs.tz(fecha_inicio_electiva, TZ_LIMA).hour(12).toDate()
         : dayjs.tz(TZ_LIMA).hour(12).toDate();
 
-      await Validators.validarAforoHorario(tx, idHorario, fechaLimiteZombie);
+      // 🚩 BL-003: capturamos el horario que validarAforoHorario ya devuelve
+      // (antes se descartaba) para tener dia_semana y capacidad_max sin una
+      // consulta extra.
+      const horario = await Validators.validarAforoHorario(tx, idHorario, fechaLimiteZombie);
+
+      // =================================================================
+      // 🎯 BL-003: la clase suelta necesita saber EN QUÉ DÍA cae antes de
+      // cobrar, para poder validar feriado y aforo de esa fecha puntual.
+      //
+      // 🔒 calcularPrimeraFechaClase usa la MISMA ventana de 7 días que
+      // generarClaseUnica, así que la fecha que validamos acá es por
+      // construcción la que se insertará cuando validarPago genere la clase.
+      // =================================================================
+      const fechaClase = calcularPrimeraFechaClase(inicioReal, horario.dia_semana);
+      if (!fechaClase) {
+        throw new ApiError(
+          '⛔ No se pudo determinar la fecha de la clase para el horario seleccionado.',
+          400
+        );
+      }
+
+      // 🎉 Feriado: rechaza la venta (no se crea inscripción ni cuenta).
+      await Validators.validarFechaNoFeriado(tx, fechaClase);
+
+      // 👮‍♂️ Aforo de esa fecha exacta (además del aforo global de arriba).
+      await Validators.validarAforoFechaClase(tx, horario, fechaClase);
 
       const nuevaInscripcion = await tx.inscripciones.create({
         data: {
@@ -920,9 +1037,14 @@ export const inscripcionService = {
           horario_id: idHorario,
           id_grupo_transaccion: null,
           estado: 'PENDIENTE_PAGO',
+          // ⚠️ fecha_inscripcion se queda en inicioReal, NO en fechaClase:
+          // pagos.service.js pasa fecha_inscripcion como fecha_inicio y la
+          // ventana de 7 días resuelve la misma fechaClase. Moverla
+          // desplazaría la aritmética de 22/29 días de los crons, el
+          // calcularFechaCorte del historial y varios orderBy.
           fecha_inscripcion: inicioReal,
           fecha_inscripcion_original: inicioReal,
-          tipo_inscripcion: 'INDIVIDUAL',
+          tipo_inscripcion: TIPO_INSCRIPCION.INDIVIDUAL,
         },
         include: { horarios_clases: true }
       });
@@ -948,13 +1070,25 @@ export const inscripcionService = {
         }
       });
 
+      // =================================================================
+      // 🚩 BL-001: una INDIVIDUAL NO genera ciclo.
+      //
+      // El link se MANTIENE porque es el puente inscripción ↔ deuda que
+      // pagos.service.js necesita para activar la inscripción y generar la
+      // clase; quitarlo rompería el flujo de pago. Lo que cambia es que nace
+      // CERRADO en la fecha de la clase en vez de con fecha_fin_ciclo: null.
+      //
+      // Sin esto, finCicloEfectivo() le derivaba inicio + 30 días y una clase
+      // suelta se reportaba como un ciclo mensual abierto en el historial, el
+      // export BL-013 y el dashboard.
+      // =================================================================
       await tx.inscripciones_deudas_link.create({
         data: {
           inscripcion_id: nuevaInscripcion.id,
           cuenta_id: nuevaCuenta.id,
           monto_asignado: totalCobrar,
-          fecha_inicio_ciclo: inicioReal,   // 🚩 NUEVO
-          fecha_fin_ciclo: null             // 🚩 NUEVO
+          fecha_inicio_ciclo: fechaClase,
+          fecha_fin_ciclo: fechaClase
         }
       });
 

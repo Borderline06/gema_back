@@ -1,3 +1,11 @@
+import { ApiError } from '../../../shared/utils/error.util.js';
+import { ESTADOS_VALIDOS_PARA_CICLO } from '../../../shared/utils/ciclo.util.js';
+import {
+  buscarFeriado,
+  cargarFeriadosActivos,
+  claveDiaDesdeFecha,
+} from '../../../shared/utils/feriado.util.js';
+
 /**
  * Verifica si el alumno tiene deudas que bloqueen el proceso.
  */
@@ -46,6 +54,78 @@ export const validarAforoHorario = async (tx, idHorario, fechaLimiteZombie) => {
 
   return horario;
 };
+
+// =================================================================
+// 🎯 BL-003: validaciones de la CLASE SUELTA.
+//
+// `validarAforoHorario` (arriba) se deja INTACTA a propósito: tiene 3
+// llamadores y es el muro de aforo del flujo REGULAR. Las dos funciones de
+// abajo son nuevas y se aplican ADEMÁS de aquella en el flujo INDIVIDUAL.
+//
+// Por qué dos chequeos de aforo y no uno: `validarAforoHorario` cuenta
+// INSCRIPCIONES del horario sin discriminar fecha, lo que para una clase suelta
+// es conservador (nunca sobrevende) pero pesimista. El chequeo por fecha es el
+// que de verdad responde "¿cabe alguien el martes 14?".
+// =================================================================
+
+/**
+ * 🎉 BL-003: rechaza la venta si la fecha de la clase cae en feriado activo.
+ *
+ * Semántica de fecha exacta CON AÑO (ver shared/utils/feriado.util.js).
+ *
+ * ⚠️ Esta SÍ lanza: corre antes de crear la cuenta por cobrar, así que abortar
+ * la transacción es exactamente lo que se quiere (no se puede vender una clase
+ * para un día en que no hay clase). La contraparte es `generarClaseUnica`, que
+ * NO lanza porque corre dentro de la transacción del pago.
+ *
+ * @param {object} tx cliente Prisma transaccional
+ * @param {Date} fechaClase
+ * @param {object|null} feriadosPrecargados índice de `cargarFeriadosActivos`
+ */
+export const validarFechaNoFeriado = async (tx, fechaClase, feriadosPrecargados = null) => {
+  const indice = feriadosPrecargados ?? (await cargarFeriadosActivos(tx));
+  const claveDia = claveDiaDesdeFecha(fechaClase);
+
+  const feriado = buscarFeriado(claveDia, indice);
+  if (feriado) {
+    throw new ApiError(
+      `⛔ La fecha de la clase (${claveDia}) es feriado: ${feriado.descripcion}. Elige otra fecha.`,
+      409
+    );
+  }
+
+  return indice;
+};
+
+/**
+ * 🎯 BL-003: aforo de una FECHA concreta, no del horario en general.
+ *
+ * Cuenta las clases ya agendadas de ese horario ese día exacto. Recibe el
+ * `horario` YA CARGADO — `validarAforoHorario` lo devuelve y los llamadores
+ * descartaban ese retorno, así que no hace falta una consulta extra.
+ *
+ * Usa el mismo fallback `capacidad_max || 20` que `validarAforoHorario` para no
+ * introducir una segunda constante de capacidad en el sistema.
+ */
+export const validarAforoFechaClase = async (tx, horario, fechaClase) => {
+  const ocupados = await tx.registros_asistencia.count({
+    where: {
+      fecha: fechaClase,
+      estado: { in: ESTADOS_VALIDOS_PARA_CICLO },
+      inscripciones: { horario_id: horario.id },
+    },
+  });
+
+  if (ocupados >= (horario.capacidad_max || 20)) {
+    throw new ApiError(
+      `⛔ El horario del día ${horario.dia_semana} ya está AGOTADO para la fecha ${claveDiaDesdeFecha(fechaClase)}.`,
+      409
+    );
+  }
+
+  return ocupados;
+};
+
 /**
  * Verifica si ya existe una deuda de renovación generada recientemente.
  */

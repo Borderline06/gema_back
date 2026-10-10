@@ -1,5 +1,7 @@
 import { prisma } from '../../config/database.config.js';
 import { ApiError } from '../../shared/utils/error.util.js';
+// 🎯 BL-001: NULL se asume REGULAR.
+import { TIPO_INSCRIPCION, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
 
 // §3.2 Prisma Selectivo — solo traemos los campos necesarios
 const HORARIO_SELECT = {
@@ -354,10 +356,14 @@ export const horarioService = {
   },
 
   getHorariosByLevel: async (alumnoId) => {
+    // 🚩 BL-001: antes era `tipo_inscripcion: 'REGULAR'` estricto, que NO
+    // matchea las filas legacy con tipo_inscripcion = NULL (las previas a la
+    // migración del campo). Para esos alumnos esto devolvía un 404 "no cuenta
+    // con ninguna inscripción" aunque tuvieran su membresía activa.
     const insc = await prisma.inscripciones.findFirst({
       where: {
         alumno_id: alumnoId,
-        tipo_inscripcion: 'REGULAR',
+        ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR),
       },
       orderBy: {
         id: 'desc'

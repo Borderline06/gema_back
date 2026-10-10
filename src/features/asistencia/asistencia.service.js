@@ -2,39 +2,28 @@ import { prisma } from '../../config/database.config.js';
 import { recuperacionService } from '../recuperaciones/recuperacion.service.js';
 import dayjs from 'dayjs';
 
-/**
- * Función auxiliar para calcular fechas DENTRO DE UN RANGO (Dinámico) 📅
- * Garantiza que la primera clase sea IGUAL o POSTERIOR a la fecha de inicio.
- */
-const calcularProximasFechas = (fechaInicio, diaSemanaClase, fechaLimite) => {
-  const fechas = [];
-  const fechaActual = new Date(fechaInicio);
-  const diaSemanaNormalizado = diaSemanaClase === 7 ? 0 : Number(diaSemanaClase);
+// 🔧 BL-003: `calcularProximasFechas` vivía acá como const privado y era la
+// única definición de "¿en qué día cae la clase?". BL-003 necesita esa
+// respuesta ANTES de crear la inscripción (para validar feriado y aforo de esa
+// fecha), así que se movió a shared/utils/clase-fecha.util.js tal cual, sin
+// duplicarla. Ver la cabecera de ese archivo: NO reescribir su aritmética a UTC.
+import {
+  DIAS_VENTANA_INDIVIDUAL,
+  calcularProximasFechas,
+} from '../../shared/utils/clase-fecha.util.js';
+// 🔧 BL-001: el 30 estaba hardcodeado acá como cuarta copia de la constante.
+import { DIAS_CICLO } from '../../shared/utils/ciclo.util.js';
+import { esIndividual } from '../../shared/utils/tipo-inscripcion.util.js';
+import {
+  cargarFeriadosActivos,
+  claveDiaDesdeFecha,
+  buscarFeriado,
+} from '../../shared/utils/feriado.util.js';
 
-  if (!Number.isInteger(diaSemanaNormalizado) || diaSemanaNormalizado < 0 || diaSemanaNormalizado > 6) {
-    throw new Error(`Dia de semana invalido para generar clases: ${diaSemanaClase}`);
-  }
-
-  // 🔥 CORRECCIÓN DE ZONA HORARIA (Mediodía para evitar saltos de día)
-  fechaActual.setHours(12, 0, 0, 0);
-
-  const limiteFijo = new Date(fechaLimite);
-  limiteFijo.setHours(12, 0, 0, 0);
-
-  // 1. Buscamos el primer día de clase válido que sea >= fechaInicio
-  // Si la fechaInicio ya coincide con diaSemanaClase, se queda ahí.
-  const diasHastaPrimeraClase = (diaSemanaNormalizado - fechaActual.getDay() + 7) % 7;
-  fechaActual.setDate(fechaActual.getDate() + diasHastaPrimeraClase);
-
-  // 2. Generamos fechas MIENTRAS no superemos el límite de los 30 días
-  // Importante: Si la primera fecha encontrada ya se pasó del límite, no agrega nada.
-  while (fechaActual <= limiteFijo) {
-    fechas.push(new Date(fechaActual));
-    fechaActual.setDate(fechaActual.getDate() + 7);
-  }
-
-  return fechas;
-};
+// 🎉 BL-003: cuántas veces se intenta correr una clase suelta hacia adelante
+// (+7 días cada vez) cuando cae en feriado, antes de rendirse y dejarla en su
+// fecha original. 4 intentos = casi un mes de margen.
+const MAX_SALTOS_POR_FERIADO = 4;
 
 export const asistenciaService = {
   /**
@@ -45,7 +34,39 @@ export const asistenciaService = {
     // 🔥 Desestructuramos incluyendo el nuevo parámetro fecha_inicio
     const { inscripcion_id, dia_semana, usuario_admin_id, coordinador_id, fecha_inicio } = params;
 
-    const DIAS_CICLO = 30;
+    // =================================================================
+    // 🛡️ BL-001: GUARDIA DE TIPO (REGULAR vs INDIVIDUAL)
+    //
+    // Una inscripción INDIVIDUAL es una clase suelta: nunca debe recibir el
+    // ciclo de 30 días. Esa bifurcación ya la hacía pagos.service.js, pero era
+    // el ÚNICO sitio del backend que la hacía — updateInscripcion (cambio de
+    // horario) llamaba acá directo y le generaba 30 clases a una clase suelta.
+    // Esta guardia blinda a cualquier llamador, presente o futuro.
+    //
+    // `tipo_inscripcion` se puede pasar por params para ahorrar la consulta
+    // cuando el llamador ya tiene la fila en mano (extensión retrocompatible:
+    // si no viene, se lee).
+    // =================================================================
+    let tipo = params.tipo_inscripcion;
+    if (tipo === undefined) {
+      const inscripcion = await tx.inscripciones.findUnique({
+        where: { id: inscripcion_id },
+        select: { tipo_inscripcion: true },
+      });
+      tipo = inscripcion?.tipo_inscripcion ?? null;
+    }
+
+    if (esIndividual(tipo)) {
+      console.log(
+        `🎟️ Inscripción ${inscripcion_id} es INDIVIDUAL: se genera 1 clase suelta, no un ciclo de ${DIAS_CICLO} días.`
+      );
+      return await asistenciaService.generarClaseUnica(tx, {
+        inscripcion_id,
+        dia_semana,
+        coordinador_id,
+        fecha_inicio,
+      });
+    }
 
     // =================================================================
     // 🧠 LÓGICA DE PUNTO DE PARTIDA (Prioridad de Negocio)
@@ -695,15 +716,70 @@ export const asistenciaService = {
     return registros.count;
   },
 
+  /**
+   * 🎟️ BL-003: genera la ÚNICA clase de una inscripción INDIVIDUAL.
+   *
+   * @param {object} params
+   * @param {object|null} [params.feriados] índice ya cargado con
+   *   `cargarFeriadosActivos` (evita reconsultar si el llamador ya lo tiene).
+   * @param {boolean} [params.reprogramarSiFeriado=true]
+   * @returns {Promise<number>} cuántos registros se insertaron.
+   *
+   * ⚠️ ESTA FUNCIÓN NO LANZA NUNCA POR FERIADO, a propósito.
+   * El llamador real es pagos.service.js -> validarPago, dentro de una
+   * $transaction. Si lanzara, un feriado creado por el admin DESPUÉS de la
+   * venta abortaría la transacción del pago: dinero ya recibido, pago sin
+   * aprobar y cuenta en PENDIENTE. La validación dura vive en
+   * inscribirIndividual (antes de cobrar); acá solo se corre la fecha.
+   */
   generarClaseUnica: async (tx, params) => {
-    const { inscripcion_id, dia_semana, coordinador_id, fecha_inicio } = params;
+    const {
+      inscripcion_id,
+      dia_semana,
+      coordinador_id,
+      fecha_inicio,
+      feriados = null,
+      reprogramarSiFeriado = true,
+    } = params;
 
-    const fechaInicioCalculo = new Date(fecha_inicio);
+    // Si el llamador no manda fecha_inicio, arrancamos hoy (antes esto producía
+    // un Invalid Date silencioso).
+    const fechaInicioCalculo = fecha_inicio ? new Date(fecha_inicio) : new Date();
 
     const fechaLimite = new Date(fechaInicioCalculo);
-    fechaLimite.setDate(fechaLimite.getDate() + 6);
+    fechaLimite.setDate(fechaLimite.getDate() + (DIAS_VENTANA_INDIVIDUAL - 1));
 
-    const fechasClases = calcularProximasFechas(fechaInicioCalculo, dia_semana, fechaLimite);
+    let fechasClases = calcularProximasFechas(fechaInicioCalculo, dia_semana, fechaLimite);
+
+    // 🎉 BL-003: si la fecha cayó en feriado, la corremos +7 días (misma
+    // ocurrencia semanal) hasta MAX_SALTOS_POR_FERIADO intentos. Si no hay
+    // hueco, se deja la fecha original (comportamiento previo) y se loguea.
+    if (reprogramarSiFeriado && fechasClases.length > 0) {
+      const indiceFeriados = feriados ?? (await cargarFeriadosActivos(tx));
+
+      let fechaCandidata = fechasClases[0];
+      let saltos = 0;
+      let feriadoDetectado = buscarFeriado(claveDiaDesdeFecha(fechaCandidata), indiceFeriados);
+
+      while (feriadoDetectado && saltos < MAX_SALTOS_POR_FERIADO) {
+        console.warn(
+          `🎉 Clase individual de inscripción ${inscripcion_id} cae en feriado (${feriadoDetectado.descripcion}). Corriendo +7 días.`
+        );
+        const siguiente = new Date(fechaCandidata);
+        siguiente.setDate(siguiente.getDate() + 7);
+        fechaCandidata = siguiente;
+        saltos += 1;
+        feriadoDetectado = buscarFeriado(claveDiaDesdeFecha(fechaCandidata), indiceFeriados);
+      }
+
+      if (feriadoDetectado) {
+        console.warn(
+          `⚠️ Inscripción ${inscripcion_id}: no se halló fecha libre de feriados en ${MAX_SALTOS_POR_FERIADO} intentos. Se deja la fecha original para NO romper el pago.`
+        );
+      } else {
+        fechasClases = [fechaCandidata];
+      }
+    }
 
     const datosAsistencia = fechasClases.map((fecha) => ({
       inscripcion_id: inscripcion_id,
@@ -719,5 +795,10 @@ export const asistenciaService = {
         skipDuplicates: true,
       });
     }
+
+    // 🚩 Antes devolvía undefined. El único llamador (pagos.service.js) ignora
+    // el retorno, así que devolver el conteo es retrocompatible y permite que
+    // generarClasesFuturas delegue acá y siga devolviendo un número.
+    return datosAsistencia.length;
   }
 };

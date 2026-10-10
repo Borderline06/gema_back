@@ -3,6 +3,9 @@ import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 
 import { ApiError } from './error.util.js';
+// 🎯 BL-001: la dirección de dependencia es siempre ciclo → tipo-inscripcion,
+// nunca al revés (tipo-inscripcion.util.js no importa nada).
+import { esIndividual } from './tipo-inscripcion.util.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -26,6 +29,18 @@ export const TZ_LIMA = 'America/Lima';
 // Ojo: NO es el mismo número que DIAS_VIGENCIA_INSCRIPCION (29), que es la
 // regla del badge de la tabla de alumnos.
 export const DIAS_CICLO = 30;
+
+// 🎯 BL-001: una inscripción INDIVIDUAL es una clase suelta, no un ciclo.
+// Su "ciclo" dura el día de la clase, así que el cron de individuales cierra
+// fecha_fin_ciclo en la fecha de esa clase en vez de a los 30 días.
+export const DIAS_CICLO_INDIVIDUAL = 1;
+
+/**
+ * 🎯 BL-001: cuántos días dura el ciclo de una inscripción según su tipo.
+ * NULL se asume REGULAR (ver tipo-inscripcion.util.js).
+ */
+export const diasCicloDeTipo = (inscripcionOTipo) =>
+  esIndividual(inscripcionOTipo) ? DIAS_CICLO_INDIVIDUAL : DIAS_CICLO;
 
 // 🎯 Estados reales de registros_asistencia: PRESENTE | FALTA | CANCELADO | PROGRAMADA.
 // CANCELADO no cuenta como clase del ciclo.

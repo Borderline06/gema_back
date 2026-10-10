@@ -6,6 +6,8 @@ import crypto from 'crypto';
 import { detectarRegimenAlumno } from '../inscripciones/logic/inscripcion.logic.js';
 import * as Validators from '../inscripciones/validators/inscripcion.validator.js';
 import { TZ_LIMA } from '../../shared/utils/ciclo.util.js';
+// 🎯 BL-001: una clase suelta no se renueva.
+import { TIPO_INSCRIPCION, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
 
 // 🔧 BL-011: este archivo importaba dayjs pelado, sin plugins, así que no podía
 // anclar las fechas de ciclo a Lima y el parseo caía en la hora local del server.
@@ -304,9 +306,21 @@ export const CuentasPorCobrarService = {
 
   // 2. MOTOR DE RENOVACIÓN: Procesa el paquete completo
   async generarRenovacionPaquete(grupoUuid, fechaInicioNueva) {
+  // 🛡️ BL-001: guardia de parámetro. Prisma IGNORA las claves `undefined` en
+  // el where, así que un grupoUuid vacío convertía este findMany en "todas las
+  // inscripciones ACTIVO del sistema" y habría renovado el club entero.
+  if (!grupoUuid) throw new Error("Se requiere el id de grupo de transacción del paquete.");
+
   return await prisma.$transaction(async (tx) => {
+    // 🚩 BL-001: filtro defensivo por tipo. Las INDIVIDUAL nacen con
+    // id_grupo_transaccion: null, así que de hecho ya no entran; esto es el
+    // cinturón de seguridad por si alguna quedara agrupada.
     const paqueteActual = await tx.inscripciones.findMany({
-      where: { id_grupo_transaccion: grupoUuid, estado: 'ACTIVO' }
+      where: {
+        id_grupo_transaccion: grupoUuid,
+        estado: 'ACTIVO',
+        ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR)
+      }
     });
 
     if (paqueteActual.length === 0) throw new Error("No hay horarios activos.");
@@ -376,12 +390,17 @@ export const CuentasPorCobrarService = {
   // aquí SÍ verificamos cupo disponible antes de reactivar cada horario,
   // porque el slot pudo llenarse mientras el paquete estaba inactivo).
   async generarRenovacionPaqueteValidado(grupoUuid, fechaInicioNueva) {
+    // 🛡️ BL-001: misma guardia que en generarRenovacionPaquete (ver allí).
+    if (!grupoUuid) throw new Error("Se requiere el id de grupo de transacción del paquete.");
+
     return await prisma.$transaction(async (tx) => {
       // Acepta ACTIVO y FINALIZADO — a diferencia del original que solo servía ACTIVO
+      // 🚩 BL-001: filtro defensivo por tipo (una clase suelta no se renueva).
       const paqueteActual = await tx.inscripciones.findMany({
         where: {
           id_grupo_transaccion: grupoUuid,
-          estado: { in: ['ACTIVO', 'FINALIZADO'] }
+          estado: { in: ['ACTIVO', 'FINALIZADO'] },
+          ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR)
         }
       });
 
