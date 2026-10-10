@@ -18,7 +18,13 @@ router.patch('/:id/finalizar', inscripcionController.finalizarVoluntaria);
 // GET: Listado por alumno (CORREGIDO el nombre del controlador)
 router.get('/alumno/:alumnoId', inscripcionController.listarPorAlumno); //
 
+// GET: 🆕 BL-012: Historial de ciclos de un mes con desglose de clases.
+// Debe ir ANTES de /historial-ciclos para que no la capture.
+// ?mes=1&anio=2026 (ambos obligatorios aquí)
+router.get('/alumno/:alumnoId/historial-ciclos/por-mes', inscripcionController.getHistorialCiclosPorMes);
+
 // GET: 🚀 NUEVA RUTA: Historial de meses/ciclos del alumno
+// 🆕 BL-012: acepta ?mes=&anio= opcionales. Sin ellos devuelve el histórico completo.
 router.get('/alumno/:alumnoId/historial-ciclos', inscripcionController.getHistorialCiclos);
 
 // =========================================================================

@@ -1,6 +1,12 @@
 import { prisma } from '../../../config/database.config.js';
 import { ApiError } from '../../../shared/utils/error.util.js';
 import { formatFechaEs } from '../../../shared/utils/date.util.js';
+// 🎯 BL-011: la vigencia del ciclo ahora vive en un solo lugar.
+import {
+  DIAS_CICLO,
+  ESTADOS_VALIDOS_PARA_CICLO,
+  sumarDiasUTC,
+} from '../../../shared/utils/ciclo.util.js';
 
 // 🔥 DAYJS + LIMA: solo para fechas de tipo Timestamp, donde el formateo en
 // UTC puede correr un día (Lima es UTC-5). Las columnas @db.Date usan formatFechaEs.
@@ -15,9 +21,6 @@ const TZ_LIMA = 'America/Lima';
 const MAPA_DIAS = { 0: 'Domingo', 1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado', 7: 'Domingo' };
 
 const formatTime = (date) => (date ? date.toISOString().substring(11, 16) : null);
-
-// 🎯 Estados reales de registros_asistencia: PRESENTE | FALTA | CANCELADO | PROGRAMADA
-const ESTADOS_VALIDOS_PARA_CICLO = ['PRESENTE', 'FALTA', 'PROGRAMADA'];
 
 // 🔧 FIX: esta función se usaba en obtenerFlagsIndividualPorSede pero nunca
 // estaba definida en el archivo — causaba ReferenceError en tiempo de ejecución.
@@ -42,18 +45,10 @@ const estaVencida = (fechaCorte) => {
   return fechaCorte.getTime() < Date.now();
 };
 
-// 🎯 BL-013: cierre real del ciclo que aplica el cron VERDUGO
-// (inscripcion-cron.service.js). Ojo: NO es el mismo número que
-// DIAS_VIGENCIA_INSCRIPCION (29), que es la regla del badge de la tabla.
-const DIAS_CIERRE_CICLO = 30;
-
-// Suma en UTC: fecha_inicio_ciclo es @db.Date (medianoche UTC) y usar
-// setDate local desplazaría el día.
-const sumarDiasUTC = (fecha, dias) => {
-  const d = new Date(fecha);
-  d.setUTCDate(d.getUTCDate() + dias);
-  return d;
-};
+// 🎯 BL-013 / BL-011: DIAS_CICLO (30) y sumarDiasUTC se movieron a
+// shared/utils/ciclo.util.js, que es ahora la única definición del cierre real
+// del ciclo. Ojo: NO es el mismo número que DIAS_VIGENCIA_INSCRIPCION (29),
+// que es la regla del badge de la tabla.
 
 export const historialAcademicoService = {
   // =================================================================
@@ -630,7 +625,7 @@ export const historialAcademicoService = {
           })
           .map((l) => (l.fecha_fin_ciclo
             ? new Date(l.fecha_fin_ciclo).getTime()
-            : sumarDiasUTC(l.fecha_inicio_ciclo, DIAS_CIERRE_CICLO).getTime()));
+            : sumarDiasUTC(l.fecha_inicio_ciclo, DIAS_CICLO).getTime()));
 
         // Multi-sede: el corte más lejano = hasta cuándo está cubierto.
         const fechaCorte = cortesVigentes.length > 0

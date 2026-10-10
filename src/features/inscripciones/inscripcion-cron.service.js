@@ -4,6 +4,7 @@ import { notificacionesService } from '../notificaciones/notificaciones.service.
 import { twilioProvider } from '../../shared/services/twilio.whatsapp.service.js';
 import { emailService } from '../../shared/services/brevo.email.service.js';
 import { inscripcionService } from './inscripcion.service.js';
+import { DIAS_CICLO } from '../../shared/utils/ciclo.util.js';
 
 // 🔥 IMPORTAMOS EL SID DE LA PLANTILLA DESDE TUS SECRETOS 🔥
 import { TWILIO_TEMPLATE_PAGO_PARCIAL_SID, TWILIO_TEMPLATE_VENCIMIENTO_SID } from '../../config/secret.config.js';
@@ -123,9 +124,12 @@ class InscripcionCronService {
           const fechaInicio = dayjs(insc.fecha_inscripcion).tz('America/Lima').startOf('day');
           const diasTranscurridos = hoyLima.diff(fechaInicio, 'day');
 
-          if (diasTranscurridos >= 30) {
+          if (diasTranscurridos >= DIAS_CICLO) {
             // 🚩 Cierre real del ciclo: día 30 exacto, no "hoy" (que puede traer tolerancia)
-            const fechaFinCicloReal = fechaInicio.add(30, 'day').toDate();
+            // 🔧 BL-011: a mediodía, para que el truncado a @db.Date no dependa
+            // de que las 05:00Z caigan en el día correcto. DIAS_CICLO vive en
+            // shared/utils/ciclo.util.js, que es la única definición del largo.
+            const fechaFinCicloReal = fechaInicio.add(DIAS_CICLO, 'day').hour(12).toDate();
 
             await prisma.$transaction(async (tx) => {
               await tx.inscripciones.update({

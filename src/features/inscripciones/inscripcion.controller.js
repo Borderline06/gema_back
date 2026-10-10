@@ -298,13 +298,19 @@ export const inscripcionController = {
   getHistorialCiclos: async (req, res, next) => {
     try {
       const { alumnoId } = req.params;
-      
+
       if (!alumnoId) {
         return res.status(400).json({ success: false, message: 'ID de alumno requerido' });
       }
 
-      const historial = await inscripcionService.obtenerHistorialCiclosAlumno(alumnoId);
+      // 🆕 BL-012: mes/anio son OPCIONALES. Sin ellos la respuesta es el
+      // histórico completo, idéntico al de siempre.
+      const { mes, anio } = req.query;
 
+      const historial = await inscripcionService.obtenerHistorialCiclosAlumno(alumnoId, { mes, anio });
+
+      // ⚠️ REGLA DE ORO: se mantiene este envelope a mano (no apiResponse),
+      // porque es el que ya consume el frontend.
       return res.status(200).json({
         success: true,
         data: historial,
@@ -312,6 +318,29 @@ export const inscripcionController = {
       });
     } catch (error) {
       next(error); // Pásalo a tu middleware de manejo de errores
+    }
+  },
+
+  // 🆕 BL-012: historial filtrado por mes con desglose de clases/asistencias.
+  getHistorialCiclosPorMes: async (req, res, next) => {
+    try {
+      const { alumnoId } = req.params;
+
+      if (!alumnoId) {
+        return res.status(400).json({ success: false, message: 'ID de alumno requerido' });
+      }
+
+      const { mes, anio } = req.query;
+
+      const resultado = await inscripcionService.obtenerHistorialCiclosPorMes(alumnoId, { mes, anio });
+
+      return res.status(200).json({
+        success: true,
+        data: resultado,
+        message: 'Historial de ciclos del mes obtenido correctamente'
+      });
+    } catch (error) {
+      next(error);
     }
   },
   getReporteIndividualesExcel: catchAsync(async (req, res) => {

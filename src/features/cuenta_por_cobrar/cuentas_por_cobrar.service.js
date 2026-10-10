@@ -1,8 +1,16 @@
 import { PrismaClient } from '@prisma/client';
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 import crypto from 'crypto';
 import { detectarRegimenAlumno } from '../inscripciones/logic/inscripcion.logic.js';
 import * as Validators from '../inscripciones/validators/inscripcion.validator.js';
+import { TZ_LIMA } from '../../shared/utils/ciclo.util.js';
+
+// 🔧 BL-011: este archivo importaba dayjs pelado, sin plugins, así que no podía
+// anclar las fechas de ciclo a Lima y el parseo caía en la hora local del server.
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const prisma = new PrismaClient();
 
@@ -325,7 +333,11 @@ export const CuentasPorCobrarService = {
     const montoPorSlot = montoTotal / paqueteActual.length;
 
     // 🚩 NUEVO: cerramos el ciclo viejo ANTES del loop
-    const fechaCierre = dayjs(fechaInicioNueva).subtract(1, 'day').toDate();
+    // 🔧 BL-011: anclado a Lima y a mediodía UTC. Antes dayjs(...) sin zona
+    // parseaba en hora local del server y podía correr un día.
+    // El ciclo viejo cierra el día ANTES de que arranque el nuevo: así no
+    // quedan huecos ni solapes cuando el alumno renueva tarde.
+    const fechaCierre = dayjs.tz(fechaInicioNueva, TZ_LIMA).subtract(1, 'day').hour(12).toDate();
     await tx.inscripciones_deudas_link.updateMany({
       where: {
         inscripcion_id: { in: paqueteActual.map(i => i.id) },
@@ -338,8 +350,8 @@ export const CuentasPorCobrarService = {
       await tx.inscripciones.update({
         where: { id: ins.id },
         data: {
-          fecha_inscripcion: dayjs(fechaInicioNueva).toDate(),
-          fecha_inscripcion_original: dayjs(fechaInicioNueva).toDate(),
+          fecha_inscripcion: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
+          fecha_inscripcion_original: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
           actualizado_en: new Date(),
           estado: 'PENDIENTE_PAGO'
         }
@@ -350,8 +362,8 @@ export const CuentasPorCobrarService = {
           inscripcion_id: ins.id,
           cuenta_id: nuevaCuenta.id,
           monto_asignado: montoPorSlot,
-          fecha_inicio_ciclo: dayjs(fechaInicioNueva).toDate(),  // 🚩 NUEVO
-          fecha_fin_ciclo: null                                  // 🚩 NUEVO
+          fecha_inicio_ciclo: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
+          fecha_fin_ciclo: null
         }
       });
     }
@@ -406,7 +418,11 @@ export const CuentasPorCobrarService = {
 
       const montoPorSlot = montoTotal / paqueteActual.length;
 
-      const fechaCierre = dayjs(fechaInicioNueva).subtract(1, 'day').toDate();
+      // 🔧 BL-011: anclado a Lima y a mediodía UTC. Antes dayjs(...) sin zona
+      // parseaba en hora local del server y podía correr un día.
+      // El ciclo viejo cierra el día ANTES de que arranque el nuevo: así no
+      // quedan huecos ni solapes cuando el alumno renueva tarde.
+      const fechaCierre = dayjs.tz(fechaInicioNueva, TZ_LIMA).subtract(1, 'day').hour(12).toDate();
       await tx.inscripciones_deudas_link.updateMany({
         where: {
           inscripcion_id: { in: paqueteActual.map(i => i.id) },
@@ -419,8 +435,8 @@ export const CuentasPorCobrarService = {
         await tx.inscripciones.update({
           where: { id: ins.id },
           data: {
-            fecha_inscripcion: dayjs(fechaInicioNueva).toDate(),
-            fecha_inscripcion_original: dayjs(fechaInicioNueva).toDate(),
+            fecha_inscripcion: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
+            fecha_inscripcion_original: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
             actualizado_en: new Date(),
             estado: 'PENDIENTE_PAGO'
           }
@@ -431,7 +447,7 @@ export const CuentasPorCobrarService = {
             inscripcion_id: ins.id,
             cuenta_id: nuevaCuenta.id,
             monto_asignado: montoPorSlot,
-            fecha_inicio_ciclo: dayjs(fechaInicioNueva).toDate(),
+            fecha_inicio_ciclo: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
             fecha_fin_ciclo: null
           }
         });

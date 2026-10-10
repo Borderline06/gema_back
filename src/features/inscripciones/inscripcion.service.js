@@ -7,6 +7,20 @@ import { asistenciaService } from '../asistencia/asistencia.service.js';
 import { ApiError } from '../../shared/utils/error.util.js';
 import { CuentasPorCobrarService } from '../cuenta_por_cobrar/cuentas_por_cobrar.service.js';
 import { pagosService } from '../pagos/pagos.service.js';
+import { formatFechaEs } from '../../shared/utils/date.util.js';
+import {
+  ESTADOS_VALIDOS_PARA_CICLO,
+  aFechaUTC,
+  cicloSolapaMes,
+  compararFilaCicloDesc,
+  compararInicioCicloAsc,
+  diaLimaAFechaUTC,
+  diasEntreUTC,
+  etiquetaMes,
+  finCicloEfectivo,
+  parsearMesAnio,
+  rangoMesUTC,
+} from '../../shared/utils/ciclo.util.js';
 
 // 🔥 IMPORTAMOS DAYJS Y CONFIGURAMOS LIMA PARA LOS LOGS 🔥
 import dayjs from 'dayjs';
@@ -451,13 +465,17 @@ export const inscripcionService = {
       // 🚩 NUEVO: cerramos el ciclo de deuda vigente (mismo criterio que el Verdugo).
       // Sin esto, el link se queda con fecha_fin_ciclo: null para siempre y el
       // alumno sigue contando como "activo" en dashboards/reportes que miren fechas.
+      //
+      // 🔧 BL-011: antes acá iba `new Date()`. fecha_fin_ciclo es @db.Date y
+      // Postgres trunca al día UTC, así que una finalización hecha entre las
+      // 19:00 y 23:59 de Lima cerraba el ciclo UN DÍA TARDE.
       await tx.inscripciones_deudas_link.updateMany({
         where: {
           inscripcion_id: Number.parseInt(id),
           fecha_fin_ciclo: null
         },
         data: {
-          fecha_fin_ciclo: new Date()
+          fecha_fin_ciclo: diaLimaAFechaUTC()
         }
       });
 
@@ -556,13 +574,14 @@ export const inscripcionService = {
         // 🚩 NUEVO: si la inscripción estaba ACTIVA (no POR_VALIDAR), su link de deuda
         // vigente no se toca en ninguna otra rama de esta función. Lo cerramos aquí
         // con el mismo criterio del Verdugo, para que no quede "vigente" para siempre.
+        // 🔧 BL-011: día calendario de Lima, no `new Date()` (ver finalizarVoluntaria).
         await tx.inscripciones_deudas_link.updateMany({
           where: {
             inscripcion_id: inscripcionId,
             fecha_fin_ciclo: null
           },
           data: {
-            fecha_fin_ciclo: new Date()
+            fecha_fin_ciclo: diaLimaAFechaUTC()
           }
         });
       }
@@ -1053,98 +1072,336 @@ export const inscripcionService = {
   },
   // =================================================================
   // 📊 HISTORIAL HÍBRIDO (INSCRIPCIONES + MESES COBRADOS)
+  //
+  // 🔧 BL-011: las fechas de ciclo salen de fecha_inicio_ciclo /
+  // fecha_fin_ciclo del link, normalizadas en UTC, y fecha_corte_ciclo pasa a
+  // ser el FIN REAL del ciclo (antes devolvía el plazo de pago de la cuenta).
+  // 🆕 BL-012: filtro opcional por mes/anio con regla de solapamiento.
+  //
+  // ⚠️ REGLA DE ORO: las 14 llaves que ya consume el frontend siguen intactas.
+  // Lo nuevo se añade; nada se renombra ni se elimina.
   // =================================================================
-  obtenerHistorialCiclosAlumno: async (alumnoId) => {
+  obtenerHistorialCiclosAlumno: async (alumnoId, filtro = {}) => {
+    const id = Number.parseInt(alumnoId, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError('ID de alumno inválido', 400);
+    }
+
+    // ⚠️ Fuera del try: el catch de abajo reempaqueta todo como 500 y se
+    // comería este 400 (misma convención que historial_academico.service.js).
+    const mesAnio = parsearMesAnio(filtro.mes, filtro.anio);
+
     try {
-      // 1. Buscamos todas las inscripciones del alumno y sus deudas asociadas
       const inscripcionesBrutas = await prisma.inscripciones.findMany({
-        where: { alumno_id: parseInt(alumnoId) },
-        include: {
-          horarios_clases: {
-            include: {
-              canchas: { include: { sedes: true } },
-              niveles_entrenamiento: true,
-              coordinadores: { include: { usuarios: true } }
-            }
-          },
-          inscripciones_deudas_link: {
-            include: {
-              cuentas_por_cobrar: true
-            },
-            orderBy: {
-              fecha_inicio_ciclo: 'asc' // 🚩 orden por vigencia real, no por creado_en
-            }
-          }
-        },
-        orderBy: {
-          fecha_inscripcion: 'desc'
-        }
+        where: { alumno_id: id },
+        include: INCLUDE_HISTORIAL_CICLOS,
+        orderBy: { fecha_inscripcion: 'desc' }
       });
 
-      const historialMeses = [];
+      const historialMeses = construirHistorialCiclos(inscripcionesBrutas);
 
-      // 2. Procesamos cada inscripción para extraer sus "Meses" (Ciclos)
-      for (const inscripcion of inscripcionesBrutas) {
-        const hc = inscripcion.horarios_clases;
-        const linksDeuda = inscripcion.inscripciones_deudas_link;
+      // 🆕 BL-012: sin params el resultado es el histórico completo, igual que antes.
+      if (!mesAnio) return historialMeses;
 
-        // Si la inscripción no tiene cuentas por cobrar generadas, igual la mostramos como el mes inicial
-        if (linksDeuda.length === 0) {
-          historialMeses.push({
-            inscripcion_id: inscripcion.id,
-            estado_inscripcion: inscripcion.estado,
-            sede: hc?.canchas?.sedes?.nombre || 'S/D',
-            nivel: hc?.niveles_entrenamiento?.nombre || 'S/D',
-            profesor: hc?.coordinadores?.usuarios?.nombres || 'S/D',
-            tipo_inscripcion: inscripcion.tipo_inscripcion,
-
-            numero_mes_ciclo: 1,
-            fecha_inicio_ciclo: inscripcion.fecha_inscripcion,
-            fecha_fin_ciclo: null,
-            fecha_corte_ciclo: null,
-            estado_pago_mes: 'SIN_CUENTA',
-            monto_mes: 0,
-            cuenta_id: null
-          });
-          continue;
-        }
-
-        // Si tiene deudas, iteramos sobre cada una representando un "Mes"
-        linksDeuda.forEach((link, index) => {
-          const cuenta = link.cuentas_por_cobrar;
-
-          historialMeses.push({
-            inscripcion_id: inscripcion.id,
-            estado_inscripcion: inscripcion.estado,
-            sede: hc?.canchas?.sedes?.nombre || 'S/D',
-            nivel: hc?.niveles_entrenamiento?.nombre || 'S/D',
-            profesor: hc?.coordinadores?.usuarios?.nombres || 'S/D',
-            tipo_inscripcion: inscripcion.tipo_inscripcion,
-
-            numero_mes_ciclo: index + 1,
-            fecha_inicio_ciclo: link.fecha_inicio_ciclo,     // ✅ dato real, guardado en el link
-            fecha_fin_ciclo: link.fecha_fin_ciclo,            // ✅ null si sigue vigente
-            fecha_corte_ciclo: cuenta.fecha_vencimiento,      // se mantiene, sirve para saber el plazo de pago
-            estado_pago_mes: cuenta.estado,
-            monto_mes: Number(link.monto_asignado),
-            cuenta_id: cuenta.id,
-            es_estimado: link.es_estimado                     // ✅ bonus: para marcar en el front si es dato del backfill
-          });
-        });
-      }
-
-      // 3. Ordenar el resultado final por fecha de inicio real de ciclo
-      historialMeses.sort((a, b) => new Date(b.fecha_inicio_ciclo) - new Date(a.fecha_inicio_ciclo));
-
-      return historialMeses;
+      return historialMeses.filter((fila) =>
+        cicloSolapaMes(fila.fecha_inicio_ciclo, fila.fecha_fin_ciclo, mesAnio.mes, mesAnio.anio)
+      );
 
     } catch (error) {
+      if (error instanceof ApiError) throw error;
       console.error(`❌ [ERROR OBTENER HISTORIAL MESES] Alumno: ${alumnoId} | ${error.message}`);
       throw new ApiError('Error al obtener el historial de ciclos del alumno', 500);
     }
   },
+
+  // =================================================================
+  // 🆕 BL-012: HISTORIAL DE CICLOS POR MES, CON DESGLOSE DE CLASES
+  //
+  // Endpoint hermano del anterior: mismas llaves por ciclo + un sub-nodo
+  // desglose_mes con las clases/asistencias del tramo que cae en el mes
+  // pedido. Un ciclo a caballo entre dos meses (15/ene–15/feb) aparece en
+  // AMBOS, con el desglose recortado al mes consultado.
+  // =================================================================
+  obtenerHistorialCiclosPorMes: async (alumnoId, filtro = {}) => {
+    const id = Number.parseInt(alumnoId, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ApiError('ID de alumno inválido', 400);
+    }
+
+    // ⚠️ Acá mes/anio SÍ son obligatorios. También fuera del try.
+    const { mes, anio } = parsearMesAnio(filtro.mes, filtro.anio, { requerido: true });
+
+    try {
+      const inscripcionesBrutas = await prisma.inscripciones.findMany({
+        where: { alumno_id: id },
+        include: {
+          ...INCLUDE_HISTORIAL_CICLOS,
+          // Las asistencias cuelgan de la inscripción, no del link: se reparten
+          // por ciclo más abajo según la ventana de vigencia de cada uno.
+          registros_asistencia: {
+            where: { estado: { in: ESTADOS_VALIDOS_PARA_CICLO } },
+            select: { fecha: true, estado: true },
+            orderBy: { fecha: 'asc' }
+          }
+        },
+        orderBy: { fecha_inscripcion: 'desc' }
+      });
+
+      // Se construye el historial COMPLETO para que numero_mes_ciclo sea el
+      // número real del ciclo dentro de su inscripción, no el del mes filtrado.
+      const todosLosCiclos = construirHistorialCiclos(inscripcionesBrutas);
+
+      const asistenciasPorInscripcion = new Map(
+        inscripcionesBrutas.map((insc) => [insc.id, insc.registros_asistencia || []])
+      );
+
+      const { desde, hasta } = rangoMesUTC(mes, anio);
+
+      const ciclos = todosLosCiclos
+        .filter((fila) => cicloSolapaMes(fila.fecha_inicio_ciclo, fila.fecha_fin_ciclo, mes, anio))
+        .map((fila) => ({
+          ...fila,
+          desglose_mes: desgloseDelTramo(
+            fila,
+            asistenciasPorInscripcion.get(fila.inscripcion_id) || [],
+            desde,
+            hasta
+          )
+        }));
+
+      const resumen_mes = ciclos.reduce((acc, c) => ({
+        total_clases: acc.total_clases + c.desglose_mes.total_clases,
+        clases_presente: acc.clases_presente + c.desglose_mes.clases_presente,
+        clases_falta: acc.clases_falta + c.desglose_mes.clases_falta,
+        clases_programadas: acc.clases_programadas + c.desglose_mes.clases_programadas,
+      }), { total_clases: 0, clases_presente: 0, clases_falta: 0, clases_programadas: 0 });
+
+      return {
+        mes,
+        anio,
+        etiqueta_mes: etiquetaMes(mes, anio),
+        rango_mes: { desde, hasta },
+        // 🎯 Alimenta el selector del frontend sin una segunda llamada. Se
+        // calcula sobre TODOS los ciclos, no solo los del mes pedido.
+        meses_disponibles: construirMesesDisponibles(todosLosCiclos),
+        total_ciclos: ciclos.length,
+        resumen_mes,
+        ciclos,
+      };
+
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      console.error(`❌ [ERROR HISTORIAL CICLOS POR MES] Alumno: ${alumnoId} | ${mes}/${anio} | ${error.message}`);
+      throw new ApiError('Error al obtener el historial de ciclos por mes', 500);
+    }
+  },
 };
 
+
+// =================================================================
+// --- HELPERS HISTORIAL DE CICLOS (BL-011 / BL-012) ---
+// =================================================================
+
+// Un solo include compartido por los dos endpoints del historial, para que
+// ambos vean exactamente los mismos datos de sede/nivel/profesor.
+const INCLUDE_HISTORIAL_CICLOS = {
+  horarios_clases: {
+    include: {
+      canchas: { include: { sedes: true } },
+      niveles_entrenamiento: true,
+      coordinadores: { include: { usuarios: true } }
+    }
+  },
+  inscripciones_deudas_link: {
+    include: { cuentas_por_cobrar: true }
+    // 🔧 BL-011: el orderBy de Prisma se quitó a propósito. Postgres ordena
+    // ASC NULLS LAST, así que los links sin fecha_inicio_ciclo (previos al
+    // backfill) se llevaban el numero_mes_ciclo más alto. Se ordena en JS con
+    // compararInicioCicloAsc, que manda los NULL al final explícitamente.
+  }
+};
+
+// Datos de la inscripción que se repiten en cada fila del historial.
+function datosInscripcion(inscripcion) {
+  const hc = inscripcion.horarios_clases;
+  return {
+    inscripcion_id: inscripcion.id,
+    estado_inscripcion: inscripcion.estado,
+    sede: hc?.canchas?.sedes?.nombre || 'S/D',
+    nivel: hc?.niveles_entrenamiento?.nombre || 'S/D',
+    profesor: hc?.coordinadores?.usuarios?.nombres || 'S/D',
+    tipo_inscripcion: inscripcion.tipo_inscripcion,
+  };
+}
+
+// Fila de un ciclo real (con link de deuda).
+// Las 14 primeras llaves son el contrato que ya consume el frontend.
+function filaCiclo(inscripcion, link, numeroMesCiclo) {
+  const cuenta = link.cuentas_por_cobrar;
+  const inicio = aFechaUTC(link.fecha_inicio_ciclo);
+  const fin = aFechaUTC(link.fecha_fin_ciclo);
+  const corte = finCicloEfectivo(link.fecha_inicio_ciclo, link.fecha_fin_ciclo);
+  const esVigente = link.fecha_fin_ciclo === null;
+
+  return {
+    ...datosInscripcion(inscripcion),
+
+    numero_mes_ciclo: numeroMesCiclo,
+    fecha_inicio_ciclo: inicio,                 // ✅ dato real del link, normalizado en UTC
+    fecha_fin_ciclo: fin,                       // ✅ null si sigue vigente
+    // 🔧 BL-011: antes acá venía cuenta.fecha_vencimiento, que es el PLAZO DE
+    // PAGO (hoy + 2 días), no el fin del ciclo. Ahora es el fin real.
+    // El plazo de pago no se pierde: va en fecha_vencimiento_pago.
+    fecha_corte_ciclo: corte,
+    estado_pago_mes: cuenta?.estado ?? 'SIN_CUENTA',
+    monto_mes: Number(link.monto_asignado),
+    cuenta_id: cuenta?.id ?? null,
+    es_estimado: link.es_estimado,              // true = viene del backfill
+
+    // --- 🆕 llaves aditivas (el front puede ignorarlas sin romperse) ---
+    estado_ciclo: esVigente ? 'VIGENTE' : 'CERRADO',
+    es_vigente: esVigente,
+    sin_vigencia: inicio === null,              // sin fecha_inicio_ciclo en BD
+    dias_ciclo: diasEntreUTC(inicio, corte),
+    fecha_inicio_ciclo_label: formatFechaEs(inicio),
+    fecha_fin_ciclo_label: fin ? formatFechaEs(fin) : 'Vigente',
+    fecha_corte_ciclo_label: formatFechaEs(corte),
+    fecha_vencimiento_pago: cuenta?.fecha_vencimiento ?? null,
+  };
+}
+
+// Fila de una inscripción que todavía no generó cuenta por cobrar.
+// 🔧 BL-011: mismo juego de llaves que filaCiclo — antes esta rama omitía
+// es_estimado y metía un Timestamp(6) crudo en fecha_inicio_ciclo.
+function filaSinCuenta(inscripcion) {
+  const inicio = aFechaUTC(inscripcion.fecha_inscripcion);
+  const corte = finCicloEfectivo(inscripcion.fecha_inscripcion, null);
+
+  return {
+    ...datosInscripcion(inscripcion),
+
+    numero_mes_ciclo: 1,
+    fecha_inicio_ciclo: inicio,
+    fecha_fin_ciclo: null,
+    fecha_corte_ciclo: corte,
+    estado_pago_mes: 'SIN_CUENTA',
+    monto_mes: 0,
+    cuenta_id: null,
+    es_estimado: false,
+
+    estado_ciclo: 'SIN_CUENTA',
+    es_vigente: true,
+    sin_vigencia: inicio === null,
+    dias_ciclo: diasEntreUTC(inicio, corte),
+    fecha_inicio_ciclo_label: formatFechaEs(inicio),
+    fecha_fin_ciclo_label: 'Vigente',
+    fecha_corte_ciclo_label: formatFechaEs(corte),
+    fecha_vencimiento_pago: null,
+  };
+}
+
+// Aplana inscripciones -> filas de ciclo, numerando y ordenando bien.
+function construirHistorialCiclos(inscripciones) {
+  const filas = [];
+
+  for (const inscripcion of inscripciones) {
+    const links = [...(inscripcion.inscripciones_deudas_link || [])].sort(compararInicioCicloAsc);
+
+    if (links.length === 0) {
+      filas.push(filaSinCuenta(inscripcion));
+      continue;
+    }
+
+    // numero_mes_ciclo se asigna DESPUÉS de ordenar: es el orden cronológico
+    // real del ciclo dentro de su inscripción.
+    links.forEach((link, index) => filas.push(filaCiclo(inscripcion, link, index + 1)));
+  }
+
+  // 🔧 BL-011: comparador null-safe. El sort anterior hacía new Date(null),
+  // que es la época 1970, y hundía los ciclos sin fecha al fondo de la lista.
+  filas.sort(compararFilaCicloDesc);
+
+  return filas;
+}
+
+// 🆕 BL-012: clases y asistencias del tramo del ciclo que cae dentro del mes.
+// El tramo es la intersección de [inicio, fin efectivo] con [desdeMes, hastaMes].
+function desgloseDelTramo(fila, asistencias, desdeMes, hastaMes) {
+  const vacio = {
+    dias_del_ciclo_en_el_mes: 0,
+    total_clases: 0,
+    clases_presente: 0,
+    clases_falta: 0,
+    clases_programadas: 0,
+    clases: [],
+  };
+
+  // Sin fecha_inicio_ciclo no hay ventana que recortar: no se puede atribuir
+  // ninguna asistencia a este ciclo.
+  if (!fila.fecha_inicio_ciclo || !fila.fecha_corte_ciclo) return vacio;
+
+  const inicioTramo = new Date(Math.max(fila.fecha_inicio_ciclo.getTime(), desdeMes.getTime()));
+  const finTramo = new Date(Math.min(fila.fecha_corte_ciclo.getTime(), hastaMes.getTime()));
+  if (finTramo < inicioTramo) return vacio;
+
+  const clases = asistencias
+    .map((r) => ({ fechaUTC: aFechaUTC(r.fecha), estado: r.estado, fecha: r.fecha }))
+    .filter((r) => r.fechaUTC && r.fechaUTC >= inicioTramo && r.fechaUTC <= finTramo)
+    .map((r) => ({
+      fecha: r.fechaUTC,
+      fecha_label: formatFechaEs(r.fechaUTC),
+      estado: r.estado,
+    }));
+
+  return {
+    dias_del_ciclo_en_el_mes: diasEntreUTC(inicioTramo, finTramo) + 1, // inclusivo
+    total_clases: clases.length,
+    clases_presente: clases.filter((c) => c.estado === 'PRESENTE').length,
+    clases_falta: clases.filter((c) => c.estado === 'FALTA').length,
+    clases_programadas: clases.filter((c) => c.estado === 'PROGRAMADA').length,
+    clases,
+  };
+}
+
+// 🆕 BL-012: meses que el selector del frontend debe ofrecer. Un ciclo aporta
+// TODOS los meses que toca, así que uno del 15/ene al 15/feb aparece en enero
+// y en febrero.
+function construirMesesDisponibles(filas) {
+  const mapa = new Map();
+
+  for (const fila of filas) {
+    if (!fila.fecha_inicio_ciclo || !fila.fecha_corte_ciclo) continue;
+
+    let cursor = new Date(Date.UTC(
+      fila.fecha_inicio_ciclo.getUTCFullYear(),
+      fila.fecha_inicio_ciclo.getUTCMonth(),
+      1
+    ));
+    const limite = new Date(Date.UTC(
+      fila.fecha_corte_ciclo.getUTCFullYear(),
+      fila.fecha_corte_ciclo.getUTCMonth(),
+      1
+    ));
+
+    while (cursor <= limite) {
+      const mes = cursor.getUTCMonth() + 1;
+      const anio = cursor.getUTCFullYear();
+      const clave = `${anio}-${String(mes).padStart(2, '0')}`;
+
+      const existente = mapa.get(clave);
+      if (existente) {
+        existente.total_ciclos += 1;
+      } else {
+        mapa.set(clave, { mes, anio, etiqueta: etiquetaMes(mes, anio), total_ciclos: 1 });
+      }
+
+      cursor = new Date(Date.UTC(anio, mes, 1)); // siguiente mes
+    }
+  }
+
+  // Más reciente primero, igual que el historial.
+  return [...mapa.values()].sort((a, b) => (b.anio - a.anio) || (b.mes - a.mes));
+}
 
 // --- HELPER (Calendario) ---
 function contarClasesEnIntervalo(diaSemana, inicio, fin) {
