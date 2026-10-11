@@ -343,6 +343,34 @@ export const inscripcionController = {
       next(error);
     }
   },
+  // 🆕 BL-004: último plan del alumno para pre-llenar la reinscripción.
+  getUltimoPlan: async (req, res, next) => {
+    try {
+      const { alumnoId } = req.params;
+
+      // Regex de entero estricto en vez de parseInt (que aceptaría "12abc"),
+      // misma convención que parsearMesAnio y el validador de sede_id.
+      if (!alumnoId || !/^[0-9]+$/.test(String(alumnoId).trim())) {
+        return res.status(400).json({
+          success: false,
+          message: 'El ID de alumno debe ser un entero válido',
+        });
+      }
+
+      const ultimoPlan = await inscripcionService.obtenerUltimoPlanAlumno(alumnoId);
+
+      return res.status(200).json({
+        success: true,
+        data: ultimoPlan,
+        message: ultimoPlan.tiene_plan_previo
+          ? 'Último plan obtenido correctamente'
+          : 'El alumno no tiene un plan previo para reinscribir',
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
   getReporteIndividualesExcel: catchAsync(async (req, res) => {
     // 1. Llamamos al servicio
     const dataReporte = await inscripcionReporteService.getReporteIndividuales();

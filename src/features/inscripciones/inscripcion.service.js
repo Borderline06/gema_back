@@ -19,6 +19,7 @@ import {
   etiquetaMes,
   finCicloEfectivo,
   parsearMesAnio,
+  sumarDiasUTC,
   rangoMesUTC,
 } from '../../shared/utils/ciclo.util.js';
 // 🎯 BL-001 / BL-003
@@ -28,6 +29,9 @@ import {
   whereTipoInscripcion,
 } from '../../shared/utils/tipo-inscripcion.util.js';
 import { calcularPrimeraFechaClase } from '../../shared/utils/clase-fecha.util.js';
+// 🆕 BL-004: el pre-llenado devuelve los horarios con la misma forma que
+// GET /api/horarios/nivel, reusando el select y el formateador de horarios.
+import { HORARIO_SELECT, formatearHorario } from '../horarios/horario.service.js';
 
 // 🔥 IMPORTAMOS DAYJS Y CONFIGURAMOS LIMA PARA LOS LOGS 🔥
 import dayjs from 'dayjs';
@@ -978,6 +982,204 @@ export const inscripcionService = {
 
       return { success: true, count: idsInscripciones.length, nueva_fecha: fechaFormateada };
     });
+  },
+
+  // =================================================================
+  // 🆕 BL-004: ÚLTIMO PLAN DEL ALUMNO (pre-llenado de reinscripción)
+  //
+  // Devuelve el último PAQUETE REGULAR completo, con los IDS de sede / nivel /
+  // horario, para que el front pre-llene el formulario y mande el POST / de
+  // siempre. Es SOLO LECTURA: no crea nada ni toca FASE A.
+  //
+  // Por qué no sirve ninguno de los endpoints que ya había: obtenerPorAlumno y
+  // el historial de ciclos devuelven sede y nivel por NOMBRE, y sin ids el
+  // front no puede pre-seleccionar nada.
+  //
+  // ⚠️ El paquete se reconstruye por cuenta_id y NO por id_grupo_transaccion:
+  // el cron VERDUGO pone id_grupo_transaccion = null al finalizar la
+  // inscripción (inscripcion-cron.service.js -> gestionarVencimientos), que es
+  // EXACTAMENTE el caso que nos interesa acá (alumno con ciclo vencido que
+  // reinscribe). inscribirPaquete crea UNA cuenta por paquete, así que la
+  // cuenta sí sobrevive como agrupador.
+  // =================================================================
+  obtenerUltimoPlanAlumno: async (alumnoId) => {
+    const idAlumno = Number.parseInt(alumnoId);
+
+    const sinPlan = {
+      tiene_plan_previo: false,
+      alumno_id: idAlumno,
+      cuenta_id_origen: null,
+      horarios: [],
+      plan: null,
+      ultimo_ciclo: null,
+      fecha_inicio_sugerida: dayjs(diaLimaAFechaUTC()).utc().format('YYYY-MM-DD'),
+    };
+
+    // 🚩 BL-001: whereTipoInscripcion tolera tipo_inscripcion = NULL (las filas
+    // legacy previas a la migración, que son REGULAR). Ocupa la llave OR, que
+    // acá está libre.
+    const whereRegular = {
+      alumno_id: idAlumno,
+      ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR),
+    };
+
+    // 1️⃣ El último link de deuda REGULAR del alumno.
+    // ⚠️ orderBy creado_en y NO fecha_inicio_ciclo: Postgres ordena DESC NULLS
+    // FIRST, así que los links previos al backfill (sin fecha_inicio_ciclo) se
+    // llevarían el primer puesto. Es el mismo problema que compararInicioCicloAsc
+    // corrige en el historial. creado_en tiene @default(now()), nunca es null.
+    const ultimoLink = await prisma.inscripciones_deudas_link.findFirst({
+      where: { inscripciones: whereRegular },
+      orderBy: { creado_en: 'desc' },
+      include: {
+        cuentas_por_cobrar: { include: { catalogo_conceptos: true } },
+      },
+    });
+
+    let cuentaIdOrigen = null;
+    let idsInscripciones = [];
+    let conceptoPlan = null;
+
+    if (ultimoLink) {
+      cuentaIdOrigen = ultimoLink.cuenta_id;
+      conceptoPlan = ultimoLink.cuentas_por_cobrar?.catalogo_conceptos ?? null;
+
+      const linksDelPaquete = await prisma.inscripciones_deudas_link.findMany({
+        where: { cuenta_id: cuentaIdOrigen },
+        select: { inscripcion_id: true },
+      });
+      idsInscripciones = [...new Set(linksDelPaquete.map((l) => l.inscripcion_id))];
+    } else {
+      // 2️⃣ Fallback: inscripción REGULAR que nunca llegó a generar cuenta.
+      // Acá sí toca agrupar por id_grupo_transaccion, porque no hay cuenta.
+      const ultimaInsc = await prisma.inscripciones.findFirst({
+        where: whereRegular,
+        orderBy: [{ fecha_inscripcion: 'desc' }, { id: 'desc' }],
+        select: { id: true, id_grupo_transaccion: true },
+      });
+
+      if (!ultimaInsc) return sinPlan;
+
+      if (ultimaInsc.id_grupo_transaccion) {
+        const hermanas = await prisma.inscripciones.findMany({
+          where: {
+            alumno_id: idAlumno,
+            id_grupo_transaccion: ultimaInsc.id_grupo_transaccion,
+          },
+          select: { id: true },
+        });
+        idsInscripciones = hermanas.map((i) => i.id);
+      } else {
+        idsInscripciones = [ultimaInsc.id];
+      }
+    }
+
+    if (idsInscripciones.length === 0) return sinPlan;
+
+    const inscripciones = await prisma.inscripciones.findMany({
+      where: { id: { in: idsInscripciones } },
+      include: { horarios_clases: { select: HORARIO_SELECT } },
+      orderBy: { id: 'asc' },
+    });
+
+    if (inscripciones.length === 0) return sinPlan;
+
+    // 3️⃣ Disponibilidad real de cada horario, con el MISMO muro de aforo que
+    // va a aplicar el POST de inscripción. Así el pre-llenado nunca ofrece un
+    // horario que después rebote con "AGOTADO".
+    const paramZ = await prisma.parametros_sistema.findUnique({
+      where: { clave: 'TIEMPO_LIMITE_RESERVA_MIN' },
+    });
+    const fechaLimiteZombie = new Date(
+      Date.now() - (paramZ ? Number.parseInt(paramZ.valor) : 20) * 60 * 1000
+    );
+
+    const horarios = [];
+    for (const insc of inscripciones) {
+      const h = insc.horarios_clases;
+      if (!h) continue;
+
+      let disponible = true;
+      let motivoNoDisponible = null;
+
+      if (!h.activo) {
+        disponible = false;
+        motivoNoDisponible = 'El horario fue desactivado por administración.';
+      } else {
+        try {
+          // Se reusa el validador en vez de duplicar la cuenta de ocupados:
+          // es el mismo criterio (ACTIVO / POR_VALIDAR / VENCIDO / reservas no
+          // zombies) que decidirá si la reinscripción pasa.
+          await Validators.validarAforoHorario(prisma, h.id, fechaLimiteZombie);
+        } catch (error) {
+          disponible = false;
+          motivoNoDisponible = error.message;
+        }
+      }
+
+      horarios.push({
+        ...formatearHorario(h),
+        inscripcion_id: insc.id,
+        estado_inscripcion: insc.estado,
+        disponible,
+        motivo_no_disponible: motivoNoDisponible,
+      });
+    }
+
+    // 4️⃣ Ciclo del último link + fecha sugerida para arrancar el siguiente.
+    let ultimoCiclo = null;
+    let fechaInicioSugerida = diaLimaAFechaUTC();
+
+    if (ultimoLink) {
+      const inicio = aFechaUTC(ultimoLink.fecha_inicio_ciclo);
+      const fin = aFechaUTC(ultimoLink.fecha_fin_ciclo);
+      const corte = finCicloEfectivo(ultimoLink.fecha_inicio_ciclo, ultimoLink.fecha_fin_ciclo);
+      const esVigente = ultimoLink.fecha_fin_ciclo === null;
+
+      // Mismas llaves que filaCiclo del historial, para que el front no tenga
+      // que aprender un segundo vocabulario de fechas.
+      ultimoCiclo = {
+        fecha_inicio_ciclo: inicio,
+        fecha_fin_ciclo: fin,
+        fecha_corte_ciclo: corte,
+        es_vigente: esVigente,
+      };
+
+      // Si el ciclo sigue corriendo, el siguiente arranca al día siguiente del
+      // corte; si ya cerró, hoy. Esta es la fecha que el front puede mandar
+      // como fecha_inicio_ciclo al validar el pago (BL-006).
+      if (esVigente && corte) {
+        const siguiente = sumarDiasUTC(corte, 1);
+        if (siguiente > fechaInicioSugerida) fechaInicioSugerida = siguiente;
+      }
+    }
+
+    return {
+      tiene_plan_previo: true,
+      alumno_id: idAlumno,
+      cuenta_id_origen: cuentaIdOrigen,
+      horarios,
+      // Mismo criterio que Logic.obtenerPlanParaRenovar: un plan desactivado
+      // por administración no se hereda.
+      // No se reusa esa función tal cual porque busca la última cuenta del
+      // alumno SIN filtrar por tipo, y a un alumno cuya última compra fue una
+      // clase suelta le devolvería CLASE_UNITARIA_2026 como "su plan".
+      plan:
+        conceptoPlan && conceptoPlan.activo
+          ? {
+              id: conceptoPlan.id,
+              codigo_interno: conceptoPlan.codigo_interno,
+              nombre: conceptoPlan.nombre,
+              precio_base: Number(conceptoPlan.precio_base),
+              cantidad_clases_semanal: conceptoPlan.cantidad_clases_semanal,
+              activo: conceptoPlan.activo,
+            }
+          : null,
+      ultimo_ciclo: ultimoCiclo,
+      // Se formatea en UTC a propósito: diaLimaAFechaUTC y sumarDiasUTC trabajan
+      // en UTC, y un format() en hora local del server correría el día.
+      fecha_inicio_sugerida: dayjs(fechaInicioSugerida).utc().format('YYYY-MM-DD'),
+    };
   },
 
   inscribirIndividual: async (data, tx = null) => {

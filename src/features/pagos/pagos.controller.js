@@ -52,19 +52,31 @@ export const pagosController = {
     try {
       // Recibimos los datos del Body.
       // 🆕 AGREGADO: 'monto_real_confirmado' por si el Admin necesita corregir.
-      const { pago_id, accion, notas, usuario_admin_id, monto_real_confirmado } = req.body;
+      // 🆕 BL-006: 'fecha_inicio_ciclo' (opcional, 'YYYY-MM-DD') por si el Admin
+      // necesita que el ciclo arranque otro día (pagó hoy, empieza el lunes).
+      const {
+        pago_id,
+        accion,
+        notas,
+        usuario_admin_id,
+        monto_real_confirmado,
+        fecha_inicio_ciclo,
+      } = req.body;
 
       if (!usuario_admin_id) {
         throw new Error('Se requiere el ID del administrador (usuario_admin_id).');
       }
 
       // Preparamos el objeto completo para el servicio
+      // ⚠️ Esta lista blanca descarta cualquier llave que no esté acá, así que
+      // todo campo nuevo del body tiene que sumarse también en este objeto.
       const data = {
         pago_id,
         accion,
         notas,
         usuario_admin_id,
         monto_real_confirmado, // <--- Aquí pasamos el dato nuevo
+        fecha_inicio_ciclo, // <--- 🆕 BL-006
       };
 
       const resultado = await pagosService.validarPago(data);

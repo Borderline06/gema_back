@@ -212,3 +212,40 @@ export const parsearMesAnio = (mes, anio, { requerido = false } = {}) => {
 
   return { mes: Number(mesBruto), anio: Number(anioBruto) };
 };
+
+/**
+ * 🆕 BL-006: normaliza la fecha de inicio de ciclo OPCIONAL que el admin manda
+ * al validar un pago ("el alumno pagó hoy pero empieza el lunes").
+ *
+ * Regex estricto en vez de `new Date(...)`, que aceptaría basura como "1abc",
+ * igual que parsearMesAnio. Ancla a MEDIODÍA de Lima y no a startOf('day'),
+ * por el invariante @db.Date de la cabecera de este archivo: así el truncado de
+ * Postgres cae siempre en el día correcto, sin importar la hora de Lima.
+ *
+ * ⚠️ Llamar SIEMPRE fuera de la $transaction: un formato inválido debe dar 400
+ * sin haber tocado la BD.
+ *
+ * @param {string|null|undefined} valor fecha en formato 'YYYY-MM-DD'
+ * @returns {Date|null} null = el admin no mandó fecha (comportamiento de siempre)
+ */
+export const parsearFechaInicioCiclo = (valor) => {
+  if (valor === null || valor === undefined || valor === '') return null;
+
+  const bruto = String(valor).trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bruto)) {
+    throw new ApiError('El campo fecha_inicio_ciclo debe tener formato YYYY-MM-DD', 400);
+  }
+
+  const fecha = dayjs.tz(bruto, TZ_LIMA);
+
+  // ⚠️ isValid() NO alcanza: dayjs.tz desborda las fechas imposibles en
+  // silencio ('2026-02-30' -> 02/03/2026, '2026-13-45' -> 14/02/2027) y sigue
+  // diciendo que son válidas. Sin este round-trip, un dedazo del admin movería
+  // el ciclo del alumno a otro mes sin que nadie se enterara.
+  if (!fecha.isValid() || fecha.format('YYYY-MM-DD') !== bruto) {
+    throw new ApiError(`El campo fecha_inicio_ciclo no es una fecha válida: ${bruto}`, 400);
+  }
+
+  return fecha.hour(12).minute(0).second(0).millisecond(0).toDate();
+};

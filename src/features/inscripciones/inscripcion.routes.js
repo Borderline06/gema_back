@@ -23,6 +23,16 @@ router.get('/alumno/:alumnoId', inscripcionController.listarPorAlumno); //
 // ?mes=1&anio=2026 (ambos obligatorios aquí)
 router.get('/alumno/:alumnoId/historial-ciclos/por-mes', inscripcionController.getHistorialCiclosPorMes);
 
+// GET: 🆕 BL-004: último plan del alumno para pre-llenar la reinscripción.
+// Solo lectura: devuelve ids de sede/nivel/horario y el front manda el POST /
+// de siempre. No colisiona con /:id porque el prefijo es /alumno/.
+router.get(
+  '/alumno/:alumnoId/ultimo-plan',
+  authenticate,
+  authorize('Administrador', 'Alumno'),
+  inscripcionController.getUltimoPlan
+);
+
 // GET: 🚀 NUEVA RUTA: Historial de meses/ciclos del alumno
 // 🆕 BL-012: acepta ?mes=&anio= opcionales. Sin ellos devuelve el histórico completo.
 router.get('/alumno/:alumnoId/historial-ciclos', inscripcionController.getHistorialCiclos);

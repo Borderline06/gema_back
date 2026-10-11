@@ -4,7 +4,10 @@ import { ApiError } from '../../shared/utils/error.util.js';
 import { TIPO_INSCRIPCION, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
 
 // §3.2 Prisma Selectivo — solo traemos los campos necesarios
-const HORARIO_SELECT = {
+// 🆕 BL-004: exportado para que el pre-llenado de reinscripción devuelva los
+// horarios con la MISMA forma que GET /api/horarios/nivel, que el front ya
+// renderiza. Exportarlo es aditivo: no cambia ninguna respuesta existente.
+export const HORARIO_SELECT = {
   id: true,
   dia_semana: true,
   hora_inicio: true,
@@ -114,7 +117,8 @@ const verificarSolapamientos = async (params) => {
 /**
  * Formatea un horario desde el resultado de Prisma al formato de la API.
  */
-const formatearHorario = (h) => ({
+// 🆕 BL-004: exportado junto con HORARIO_SELECT (ver nota de arriba).
+export const formatearHorario = (h) => ({
   id: h.id,
   dia_semana: h.dia_semana,
   hora_inicio: h.hora_inicio.toISOString().substring(11, 16),

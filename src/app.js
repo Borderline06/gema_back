@@ -119,7 +119,7 @@ app.use('/api/coordinadores', coordinadorRoutes);
 app.use('/api/feriados', feriadoRoutes);
 app.use('/api/anuncios-beneficios',anunciosBeneficio)
 app.use('/api/caja', cajaRoutes);
-app.use('/api/historial-academico', historialAcademicoRoutes); // 🆕
+app.use('/api/historial-academico', historialAcademicoRoutes); // ya p elmer no me apures xd
 
 app.use(errorHandler);
 
