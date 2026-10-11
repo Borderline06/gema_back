@@ -17,7 +17,7 @@ for a in "$@"; do
   esac
 done
 PV=()
-while IFS='=' read -r k v; do [[ -z "$k" || "$k" == \#* ]] && continue; v=${v%$''}; PV+=(-v "p_$k=$v"); done < "politicas/$PRESET.vars"
+while IFS='=' read -r k v; do [[ -z "$k" || "$k" == \#* ]] && continue; PV+=(-v "p_$k=$v"); done < <(tr -d '\015' < "politicas/$PRESET.vars")
 # los -v sueltos van despues del preset, asi que lo pisan
 sed -e '/@@POLITICA@@/{r sql/_politica_bloque.sql' -e 'd}' sql/30_migrar_sedes.sql \
  | $PSQL -d "$DB" -v ON_ERROR_STOP=1 -v keep="{$KEEP}" "${PV[@]}" "${ARGS[@]}" "${CONF[@]}"
