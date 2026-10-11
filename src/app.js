@@ -112,6 +112,9 @@ app.use('/api/lesiones', lesionRoutes);
 app.use('/api/tipos-documento', tipoDocumentosRoutes);
 app.use('/api/beneficioPendiente', beneficioPendiente);
 app.use('/api/alumno', alumnoRoutes);
+// 🆕 BL-007: alias en plural para PATCH /api/alumnos/:id/contacto-emergencia.
+// El singular sigue montado, así que ninguna ruta existente cambia.
+app.use('/api/alumnos', alumnoRoutes);
 app.use('/api/publicaciones', publicacionRoutes);
 app.use('/api/notificaciones', notificacionesRoutes);
 app.use('/api/metodos-pago', metodosPago);

@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { inscripcionController } from './inscripcion.controller.js';
 import { authorize } from '../../shared/middlewares/authorize.middleware.js';
 import { authenticate } from '../../shared/middlewares/auth.middleware.js';
+import { validate } from '../../shared/middlewares/validate.middleware.js';
+import { inscribirIndividualAdminSchema } from './inscripcion.schema.js';
 
 const router = Router();
 
@@ -75,6 +77,14 @@ router.patch('/paquete/fecha/:cuentaId', inscripcionController.actualizarFechaIn
 
 router.post('/individual', authenticate, authorize('Alumno'), inscripcionController.inscribirIndividual);
 
-router.post('/individual-admin', authenticate, authorize('Administrador'), inscripcionController.inscribirIndividualByAdmin);
+// 💰 BL-002: esta ruta recibía el body crudo. El schema valida el array de
+// clases y deja pasar (ignorado) el `montoTotal` que el front sigue enviando.
+router.post(
+  '/individual-admin',
+  authenticate,
+  authorize('Administrador'),
+  validate(inscribirIndividualAdminSchema),
+  inscripcionController.inscribirIndividualByAdmin
+);
 
 export default router;

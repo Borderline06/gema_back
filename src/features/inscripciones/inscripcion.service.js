@@ -29,6 +29,9 @@ import {
   whereTipoInscripcion,
 } from '../../shared/utils/tipo-inscripcion.util.js';
 import { calcularPrimeraFechaClase } from '../../shared/utils/clase-fecha.util.js';
+// 💰 BL-002: reparto de dinero en céntimos exactos y sincronización del puente.
+import { repartirMonto, redondear2 } from '../../shared/utils/dinero.util.js';
+import { sincronizarPuenteDeuda } from '../../shared/utils/deuda-puente.util.js';
 // 🆕 BL-004: el pre-llenado devuelve los horarios con la misma forma que
 // GET /api/horarios/nivel, reusando el select y el formateador de horarios.
 import { HORARIO_SELECT, formatearHorario } from '../horarios/horario.service.js';
@@ -114,11 +117,13 @@ export const inscripcionService = {
         }
 
         // 💸 PASO 5: CÁLCULO DE COBRO (Simple y Directo)
-        let totalCobrar = Number(conceptoAplicar.precio_base);
+        // 💰 BL-002: el precio sale SIEMPRE del catálogo y se normaliza a 2
+        // decimales, que es la precisión de la columna Decimal(10,2).
+        let totalCobrar = redondear2(conceptoAplicar.precio_base);
         let detalleCobro = [`Plan ${horario_ids.length} clases/semana`];
 
         if (incluye_camiseta) {
-          totalCobrar += 50;
+          totalCobrar = redondear2(totalCobrar + 50);
           detalleCobro.push("Camiseta Oficial Gema");
         }
 
@@ -135,14 +140,17 @@ export const inscripcionService = {
         });
 
         // 🌉 PASO 6: VINCULACIÓN A LA TABLA PUENTE (La Alcancía)
-        // Dividimos el monto (por ahora parejo) entre los slots inscritos
-        const montoPorSlot = totalCobrar / inscripcionesCreadas.length;
+        // 💰 BL-002: antes era `totalCobrar / n` y cada parte se redondeaba por
+        // separado al entrar a Decimal(10,2), así que el plan de 3 clases
+        // (S/ 400) dejaba 133.33 x3 = 399.99 en el puente contra un monto_final
+        // de 400.00. repartirMonto asigna el céntimo de residuo al primer slot.
+        const partesPorSlot = repartirMonto(totalCobrar, inscripcionesCreadas.length);
 
         await tx.inscripciones_deudas_link.createMany({
-          data: inscripcionesCreadas.map((ins) => ({
+          data: inscripcionesCreadas.map((ins, i) => ({
             inscripcion_id: ins.id,
             cuenta_id: nuevaCuenta.id,
-            monto_asignado: montoPorSlot,
+            monto_asignado: partesPorSlot[i],
             fecha_inicio_ciclo: inicioReal,   // 🚩 NUEVO
             fecha_fin_ciclo: null             // 🚩 NUEVO
           }))
@@ -161,8 +169,12 @@ export const inscripcionService = {
             ? montoActualizado * (valorNominal / 100)
             : valorNominal;
 
-          const descuentoFinal = descuentoReal > montoActualizado ? montoActualizado : descuentoReal;
-          montoActualizado -= descuentoFinal;
+          // 💰 BL-002: a céntimos antes de restar, para que el descuento que se
+          // guarda en descuentos_aplicados sea exactamente el que se descontó.
+          const descuentoFinal = redondear2(
+            descuentoReal > montoActualizado ? montoActualizado : descuentoReal
+          );
+          montoActualizado = redondear2(montoActualizado - descuentoFinal);
 
           await tx.descuentos_aplicados.create({
             data: {
@@ -185,6 +197,16 @@ export const inscripcionService = {
             estado: montoActualizado <= 0.01 ? 'PAGADA' : 'PENDIENTE'
           }
         });
+
+        // 🌉 BL-002 (FIX CENTRAL): el puente se escribió en el PASO 6 con el
+        // precio de LISTA, porque los beneficios se resuelven recién acá. Antes
+        // nadie lo re-equilibraba: monto_final quedaba descontado y
+        // SUM(monto_asignado) se quedaba en el precio sin descuento para
+        // siempre. Solo entramos si hubo beneficios: sin ellos el PASO 6 ya
+        // dejó el puente cuadrado.
+        if (beneficiosEnCola.length > 0) {
+          await sincronizarPuenteDeuda(tx, nuevaCuenta.id, montoActualizado);
+        }
 
         // 🔔 PASO 8: NOTIFICACIÓN
         await tx.notificaciones.create({
@@ -240,13 +262,28 @@ export const inscripcionService = {
         // 🚩 BL-001: excluir INDIVIDUALes acá es CRÍTICO para el cobro. Sin
         // esto, un alumno con 2 horarios regulares + 1 clase suelta activa
         // buscaba el plan de cantidad_clases_semanal: 3 y se le cobraba de más.
-        const totalCursosActivos = await tx.inscripciones.count({
+        // 💰 BL-002: antes era un `count`. Ahora traemos las filas porque hacen
+        // falta los ids (y el ciclo abierto de cada una) para crear los links
+        // del puente, que esta función no creaba en absoluto.
+        const inscripcionesActivas = await tx.inscripciones.findMany({
           where: {
             alumno_id: alumnoId,
             estado: 'ACTIVO',
             ...whereTipoInscripcion(TIPO_INSCRIPCION.REGULAR),
           },
+          select: {
+            id: true,
+            inscripciones_deudas_link: {
+              where: { fecha_fin_ciclo: null },
+              select: { id: true, fecha_inicio_ciclo: true },
+              orderBy: { id: 'desc' },
+              take: 1,
+            },
+          },
+          orderBy: { id: 'asc' },
         });
+
+        const totalCursosActivos = inscripcionesActivas.length;
 
         if (totalCursosActivos === 0) continue;
 
@@ -272,7 +309,8 @@ export const inscripcionService = {
           data: {
             alumno_id: alumnoId,
             concepto_id: planAdecuado.id,
-            monto_final: planAdecuado.precio_base,
+            // 💰 BL-002: normalizado a 2 decimales, la precisión de la columna.
+            monto_final: redondear2(planAdecuado.precio_base),
             detalle_adicional: `Renovación Automática (Plan: ${planAdecuado.nombre})`,
             fecha_vencimiento: Utils.calcularFechaVencimiento(diasAnticipacion),
             estado: 'PENDIENTE',
@@ -294,8 +332,11 @@ export const inscripcionService = {
             ? montoCorriente * (valorNominal / 100)
             : valorNominal;
 
-          const descuentoFinal = descuentoReal > montoCorriente ? montoCorriente : descuentoReal;
-          montoCorriente -= descuentoFinal;
+          // 💰 BL-002: a céntimos antes de restar (ver inscribirPaquete).
+          const descuentoFinal = redondear2(
+            descuentoReal > montoCorriente ? montoCorriente : descuentoReal
+          );
+          montoCorriente = redondear2(montoCorriente - descuentoFinal);
 
           // A. Registrar el descuento aplicado
           await tx.descuentos_aplicados.create({
@@ -325,6 +366,55 @@ export const inscripcionService = {
               monto_final: montoCorriente,
               estado: montoCorriente <= 0.01 ? 'PAGADA' : 'PENDIENTE'
             }
+          });
+        }
+
+        // =================================================================
+        // 🌉 BL-002 (FIX CENTRAL del foco #3): crear el puente.
+        //
+        // Esta función creaba la cuentas_por_cobrar y NUNCA un
+        // inscripciones_deudas_link. La deuda nacía huérfana: sin
+        // monto_asignado, invisible para el historial de ciclos (filaCiclo) y
+        // para todo lo que busca los links por cuenta_id.
+        //
+        // ⚠️ VIGENCIA: esta renovación se genera con ANTICIPACIÓN (el ciclo
+        // actual sigue corriendo unos días más), así que NO se corta el ciclo
+        // viejo "el día antes" como hace generarRenovacionPaquete —eso le
+        // robaría días al alumno—. Se le estampa su fin NATURAL
+        // (finCicloEfectivo = inicio + 30d, una fecha futura) y el ciclo nuevo
+        // arranca al día siguiente. Así queda exactamente UN link con
+        // fecha_fin_ciclo = null por inscripción, que es el invariante del que
+        // dependen el VERDUGO, es_vigente de filaCiclo y la renovación.
+        // =================================================================
+        const partesRenovacion = repartirMonto(montoCorriente, totalCursosActivos);
+
+        for (let i = 0; i < inscripcionesActivas.length; i++) {
+          const insc = inscripcionesActivas[i];
+          const linkVigente = insc.inscripciones_deudas_link[0] ?? null;
+
+          // Fin natural del ciclo en curso -> el nuevo arranca al día siguiente.
+          const finCicloActual = linkVigente
+            ? finCicloEfectivo(linkVigente.fecha_inicio_ciclo, null)
+            : null;
+
+          if (linkVigente && finCicloActual) {
+            await tx.inscripciones_deudas_link.update({
+              where: { id: linkVigente.id },
+              data: { fecha_fin_ciclo: finCicloActual },
+            });
+          }
+
+          await tx.inscripciones_deudas_link.create({
+            data: {
+              inscripcion_id: insc.id,
+              cuenta_id: nuevaCuenta.id,
+              monto_asignado: partesRenovacion[i],
+              // Sin ciclo previo del que derivar el arranque, el inicio queda
+              // null: filaCiclo ya contempla ese caso (sin_vigencia) y
+              // pagos.service.js lo estampa al validar el pago (BL-006).
+              fecha_inicio_ciclo: finCicloActual ? sumarDiasUTC(finCicloActual, 1) : null,
+              fecha_fin_ciclo: null,
+            },
           });
         }
 
@@ -565,8 +655,11 @@ export const inscripcionService = {
           })
           if (!cpto) throw new Error('Concepto de pago no encontrado');
 
-          let montoIndividual = Number(cpto.precio_base);
-          if (cuenta.detalle_adicional.toLowerCase().includes('camiseta')) montoIndividual += 50;
+          // 💰 BL-002: normalizado a 2 decimales, como en inscribirPaquete.
+          let montoIndividual = redondear2(cpto.precio_base);
+          if (cuenta.detalle_adicional.toLowerCase().includes('camiseta')) {
+            montoIndividual = redondear2(montoIndividual + 50);
+          }
           const { monto_final } = await CuentasPorCobrarService.actualizar(tx, cuenta.id, {
             alumno_id: cuenta.alumno_id,
             concepto_id: cpto.id,
@@ -582,6 +675,12 @@ export const inscripcionService = {
               cuenta_id: cuenta.id,
             }
           })
+
+          // 🌉 BL-002 (foco #5): la cuenta acaba de bajar al plan de N-1 clases
+          // y este slot salió del puente, pero los links que quedan conservaban
+          // el monto_asignado del plan ANTERIOR. Hay que repartir el monto nuevo
+          // entre los slots supervivientes.
+          await sincronizarPuenteDeuda(tx, cuenta.id, monto_final)
 
           await tx.pagos.updateMany({
             where: { cuenta_id: cuenta.id },
@@ -1191,7 +1290,11 @@ export const inscripcionService = {
   },
 
   inscribirIndividual: async (data, tx = null) => {
-    const { alumno_id, idHorario, fecha_inicio_electiva, montoDividido } = data;
+    // 💰 BL-002 (foco #4): antes llegaba `montoDividido` y SOBRESCRIBÍA el
+    // precio del catálogo. Ahora el precio sale siempre de
+    // catalogo_conceptos.precio_base; `omitirNotificacion` reemplaza el doble
+    // uso que tenía montoDividido como flag del flujo admin.
+    const { alumno_id, idHorario, fecha_inicio_electiva, omitirNotificacion } = data;
 
     const ejecutar = async (tx) => {
       await Validators.validarMuroDeDeuda(tx, alumno_id);
@@ -1259,8 +1362,12 @@ export const inscripcionService = {
         include: { horarios_clases: true }
       });
 
-      let totalCobrar = Number(conceptoAplicar.precio_base);
-      if (montoDividido) totalCobrar = Number(montoDividido);
+      // 💰 BL-002 (foco #4): el precio es SIEMPRE el de CLASE_UNITARIA_2026.
+      // Antes `montoTotal` venía crudo del body de /individual-admin y se
+      // dividía entre data.length, así que una orden de 2 clases en la que el
+      // front mandaba el precio unitario cobraba la mitad; si el campo venía
+      // `undefined`, monto_asignado terminaba en NaN.
+      let totalCobrar = redondear2(conceptoAplicar.precio_base);
       let detalleCobro = [`Plan Individual`];
 
       // // Si en caso se puede incluir camiseta en clase individual, se descomenta.
@@ -1339,7 +1446,7 @@ export const inscripcionService = {
       //   }
       // });
 
-      if (!montoDividido) {
+      if (!omitirNotificacion) {
         await tx.notificaciones.create({
           data: {
             alumno_id: parseInt(alumno_id),
@@ -1377,17 +1484,18 @@ export const inscripcionService = {
         if (alumnoIds.length !== 1) throw new ApiError("Se están registrando dos o más alumnos diferentes en el mismo proceso de inscripción individual.", 400);
 
         let results = [];
-        const divisor = data.length;
         for (const d of data) {
           const {
-            alumno_id, idHorario, fecha_inicio_electiva, montoTotal,
+            alumno_id, idHorario, fecha_inicio_electiva,
             metodo_pago,
             usuario_admin_id
           } = d;
 
-          const montoDividido = Number(montoTotal / divisor);
-
-          const dataInsc = await inscripcionService.inscribirIndividual({ alumno_id: Number(alumno_id), idHorario: Number(idHorario), fecha_inicio_electiva, montoDividido }, tx);
+          // 💰 BL-002 (foco #4): se eliminó `montoTotal / data.length`. El
+          // monto lo pone el catálogo dentro de inscribirIndividual; acá solo
+          // silenciamos la notificación al alumno, que es lo único que el viejo
+          // `montoDividido` aportaba además del precio.
+          const dataInsc = await inscripcionService.inscribirIndividual({ alumno_id: Number(alumno_id), idHorario: Number(idHorario), fecha_inicio_electiva, omitirNotificacion: true }, tx);
 
           const deuda = await tx.inscripciones_deudas_link.findFirst({
             where: { inscripcion_id: dataInsc.inscripcion.id }
