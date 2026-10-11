@@ -299,6 +299,10 @@ export const pagosService = {
               dia_semana: insc.horarios_clases.dia_semana,
               coordinador_id: insc.horarios_clases.coordinador_id,
               fecha_inicio: fechaInicioClases,
+              // 🤝 BL-010: ya tenemos la fila; sin esto la detección de choque
+              // con recuperaciones tendría que reconsultarla.
+              alumno_id: insc.alumno_id,
+              hora_inicio: insc.horarios_clases.hora_inicio,
             });
             continue;
           }
@@ -313,6 +317,12 @@ export const pagosService = {
             // 🚩 BL-001: ya tenemos la fila, así que le ahorramos la consulta a
             // la guardia de tipo de generarClasesFuturas.
             tipo_inscripcion: insc.tipo_inscripcion,
+            // 🤝 BL-010: idem para la detección de choques. NO se pasa `choques`
+            // a propósito: acá el choque solo se loguea, porque el response de
+            // validarPago no puede ganar llaves nuevas (regla de oro) y un throw
+            // haría rollback de un pago ya cobrado.
+            alumno_id: insc.alumno_id,
+            hora_inicio: insc.horarios_clases.hora_inicio,
           });
         }
       }

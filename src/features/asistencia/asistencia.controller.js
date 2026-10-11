@@ -124,6 +124,25 @@ const previsualizarClasesFuturas = catchAsync(async (req, res) => {
 });
 
 
+// 🤝 BL-010: alerta previa de choques con recuperaciones ya agendadas.
+// Solo lectura: el admin la consulta ANTES de validar el pago para saber si la
+// generación va a tener que correr alguna clase de semana.
+const previsualizarChoquesRecuperacion = catchAsync(async (req, res) => {
+  const { inscripcion_id, fecha_inicio } = req.query; // validado por Zod
+
+  const resultado = await asistenciaService.previsualizarChoquesRecuperacion({
+    inscripcion_id,
+    fecha_inicio,
+  });
+
+  return apiResponse.success(res, {
+    data: resultado,
+    message: resultado.hay_choques
+      ? `Se detectaron ${resultado.total_choques} choque(s) con clases de recuperación.`
+      : 'Sin choques con clases de recuperación.',
+  });
+});
+
 export const asistenciaController = {
   //marcarAsistencia,
   listarPorAlumno,
@@ -133,4 +152,5 @@ export const asistenciaController = {
   marcarAsistenciaMasiva,
   obtenerEstadisticasAlumno,
   previsualizarClasesFuturas,
+  previsualizarChoquesRecuperacion,
 };

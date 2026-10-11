@@ -84,3 +84,26 @@ export const calcularPrimeraFechaClase = (fechaInicio, diaSemanaClase) => {
 
   return calcularProximasFechas(inicio, diaSemanaClase, limite)[0] ?? null;
 };
+
+/**
+ * 🔁 BL-010: la MISMA ocurrencia semanal, una semana después.
+ *
+ * Es el `+7` que `generarClaseUnica` ya hacía inline para correr una clase que
+ * cae en feriado. Se extrae porque BL-010 necesita exactamente el mismo salto
+ * cuando la fecha choca con una recuperación ya agendada, y dos copias del
+ * mismo `+7` divergirían en cuanto una se "arreglara" a UTC.
+ *
+ * ⚠️ Aritmética LOCAL con ancla a mediodía, igual que `calcularProximasFechas`
+ * (ver la cabecera de este archivo: NO reescribir a UTC). Mantener el día de
+ * semana es justo el punto: la clase sigue siendo "el martes", una semana más
+ * tarde.
+ *
+ * @param {Date|string} fecha
+ * @returns {Date} nueva instancia; NO muta la entrada
+ */
+export const siguienteOcurrenciaSemanal = (fecha) => {
+  const siguiente = new Date(fecha);
+  siguiente.setHours(12, 0, 0, 0);
+  siguiente.setDate(siguiente.getDate() + 7);
+  return siguiente;
+};

@@ -906,6 +906,11 @@ export const inscripcionService = {
             dia_semana: createdInsc.horarios_clases.dia_semana,
             coordinador_id: createdInsc.horarios_clases.coordinador_id,
             fecha_inicio: createdInsc.fecha_inscripcion,
+            // 🤝 BL-010: la fila ya está en mano (el create la trae con
+            // horarios_clases incluido), así que la detección de choque con
+            // recuperaciones no reconsulta nada.
+            alumno_id: createdInsc.alumno_id,
+            hora_inicio: createdInsc.horarios_clases.hora_inicio,
           })
         } else {
           await asistenciaService.generarClasesFuturas(tx, {
@@ -915,6 +920,9 @@ export const inscripcionService = {
             coordinador_id: createdInsc.horarios_clases.coordinador_id,
             fecha_inicio: createdInsc.fecha_inscripcion,
             tipo_inscripcion: createdInsc.tipo_inscripcion,
+            // 🤝 BL-010: idem.
+            alumno_id: createdInsc.alumno_id,
+            hora_inicio: createdInsc.horarios_clases.hora_inicio,
           })
         }
 
