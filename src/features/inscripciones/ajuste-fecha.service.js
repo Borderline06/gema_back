@@ -93,7 +93,9 @@ const cargarContexto = async (cliente, cuentaId) => {
     where: { cuenta_id: cuentaId },
     include: {
       inscripciones: {
-        include: { horarios_clases: { select: { dia_semana: true, hora_inicio: true } } },
+        include: {
+          horarios_clases: { select: { dia_semana: true, hora_inicio: true, coordinador_id: true } },
+        },
       },
     },
   });
@@ -292,6 +294,7 @@ export const ajusteFechaService = {
             inscripcion_id: insc.id,
             fecha,
             estado: 'PROGRAMADA',
+            registrado_por: insc.horarios_clases.coordinador_id,
             comentario: `Regenerado por ajuste de fecha - Admin ID: ${usuarioId}`,
           })),
           skipDuplicates: true,
