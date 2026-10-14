@@ -3,7 +3,7 @@ import { inscripcionController } from './inscripcion.controller.js';
 import { authorize } from '../../shared/middlewares/authorize.middleware.js';
 import { authenticate } from '../../shared/middlewares/auth.middleware.js';
 import { validate } from '../../shared/middlewares/validate.middleware.js';
-import { inscribirIndividualAdminSchema } from './inscripcion.schema.js';
+import { inscribirIndividualAdminSchema, renovarHistoricoSchema, ajusteFechaSchema } from './inscripcion.schema.js';
 
 const router = Router();
 
@@ -33,6 +33,21 @@ router.get(
   authenticate,
   authorize('Administrador', 'Alumno'),
   inscripcionController.getUltimoPlan
+);
+
+// BL-004: renovación desde el expediente histórico.
+router.get(
+  '/alumno/:alumnoId/planes-historicos',
+  authenticate,
+  authorize('Administrador', 'Alumno'),
+  inscripcionController.getPlanesHistoricos
+);
+router.post(
+  '/alumno/:alumnoId/renovar/:cuentaId',
+  authenticate,
+  authorize('Administrador', 'Alumno'),
+  validate(renovarHistoricoSchema),
+  inscripcionController.renovarHistorico
 );
 
 // GET: 🚀 NUEVA RUTA: Historial de meses/ciclos del alumno
@@ -74,6 +89,10 @@ router.put(
 router.patch('/:id/separar-finalizar', inscripcionController.separarYFinalizar);
 
 router.patch('/paquete/fecha/:cuentaId', inscripcionController.actualizarFechaInicio);
+
+// BL-006: ajuste de fecha de inicio de un paquete pagado (solo admin)
+router.get('/paquete/:cuentaId/ajuste-fecha', authenticate, authorize('Administrador'), inscripcionController.getAjusteFecha);
+router.patch('/paquete/:cuentaId/ajuste-fecha', authenticate, authorize('Administrador'), validate(ajusteFechaSchema), inscripcionController.ajustarFechaPaquete);
 
 router.post('/individual', authenticate, authorize('Alumno'), inscripcionController.inscribirIndividual);
 

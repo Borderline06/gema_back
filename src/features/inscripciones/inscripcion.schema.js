@@ -45,3 +45,23 @@ export const inscribirIndividualAdminSchema = z
       .passthrough()
   )
   .min(1, 'Se requiere al menos una clase para inscribir');
+
+// BL-006: ajuste de fecha de inicio de un paquete pagado.
+export const ajusteFechaSchema = z.object({
+  nueva_fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'nueva_fecha debe tener formato YYYY-MM-DD'),
+  motivo: z.string().trim().max(500, 'El motivo no puede superar 500 caracteres').optional(),
+});
+
+// BL-004: body de POST /alumno/:alumnoId/renovar/:cuentaId
+export const renovarHistoricoSchema = z
+  .object({
+    horario_ids: z
+      .array(z.coerce.number().int('horario_ids debe contener enteros').positive())
+      .min(1, 'Debes enviar al menos un horario')
+      .optional(),
+    fecha_inicio: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'fecha_inicio debe tener formato YYYY-MM-DD')
+      .optional(),
+  })
+  .strict();

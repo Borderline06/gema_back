@@ -106,6 +106,7 @@ model cuentas_por_cobrar {
   descuentos_aplicados      descuentos_aplicados[]
   pagos                     pagos[]
   inscripciones_deudas_link inscripciones_deudas_link[]
+  auditoria_ajuste_fecha    auditoria_ajuste_fecha[]
 }
 
 model direcciones {
@@ -364,6 +365,7 @@ model usuarios {
   refresh_tokens          refresh_tokens[]
   notificaciones          notificaciones[]
   reprogramaciones_clases reprogramaciones_clases[]
+  auditoria_ajuste_fecha  auditoria_ajuste_fecha[]
   roles                   roles                     @relation(fields: [rol_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   tipos_documento         tipos_documento?          @relation(fields: [tipo_documento_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
@@ -484,4 +486,21 @@ model anuncios_beneficios {
   orden          Int       @default(0) // Para ordenar el carrusel
   creado_en      DateTime? @default(now()) @db.Timestamp(6)
   actualizado_en DateTime? @default(now()) @updatedAt @db.Timestamp(6)
+}
+
+// BL-006: bitácora de ajustes de fecha de inicio de un paquete ya pagado.
+model auditoria_ajuste_fecha {
+  id                Int                @id @default(autoincrement())
+  cuenta_id         Int
+  fecha_anterior    DateTime           @db.Date
+  fecha_nueva       DateTime           @db.Date
+  clases_eliminadas Int
+  clases_generadas  Int
+  motivo            String?            @db.Text
+  realizado_por     Int
+  realizado_en      DateTime           @default(now()) @db.Timestamptz(6)
+  cuentas_por_cobrar cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  usuarios          usuarios           @relation(fields: [realizado_por], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([cuenta_id])
 }
