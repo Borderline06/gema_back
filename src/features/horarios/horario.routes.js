@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { horarioController } from './horario.controller.js';
-import { validate, validateParams } from '../../shared/middlewares/validate.middleware.js';
+import { validate, validateParams, validateQuery } from '../../shared/middlewares/validate.middleware.js';
 import { authenticate } from '../../shared/middlewares/auth.middleware.js';
 import { authorize } from '../../shared/middlewares/authorize.middleware.js';
 import { horarioSchema } from './horario.schema.js';
@@ -48,5 +48,14 @@ router.get(
   authenticate,
   horarioController.getHorariosByLevel
 )
+
+// 🎯 BL-003: cupos por fecha para el calendario de clase única.
+router.get(
+  '/:id/disponibilidad',
+  authenticate,
+  validateParams(horarioSchema.idParamSchema),
+  validateQuery(horarioSchema.disponibilidadQuerySchema),
+  horarioController.getDisponibilidad
+);
 
 export default router;
