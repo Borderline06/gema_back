@@ -239,11 +239,14 @@ export const inscripcionController = {
       })
     } catch (e) {
       console.error(e)
-      return apiResponse.error(
-        res,
-        e.message || 'Error interno',
-        e.statusCode || 500
-      )
+      // 🤝 BL-010: se reenvía `details` (choque con recuperación → 409 con
+      // fecha/hora). `details` es undefined en el resto de errores, así que su
+      // JSON no cambia.
+      return apiResponse.error(res, {
+        message: e.message || 'Error interno',
+        status: e.statusCode || 500,
+        details: e.details,
+      })
     }
   },
   separarYFinalizar: async (req, res) => {

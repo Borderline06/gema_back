@@ -87,6 +87,18 @@ export const pagosController = {
         data: resultado,
       });
     } catch (error) {
+      // 🤝 BL-010: un choque con una recuperación PROGRAMADA responde 409 con
+      // `details` ({codigo, fecha, hora, choques}) para que el front muestre la
+      // alerta. Es deliberadamente el ÚNICO error que deja de ser 400: el resto
+      // conserva el 400 y las llaves de siempre (regla de oro).
+      if (error.statusCode === 409 && error.details?.codigo === 'CHOQUE_RECUPERACION') {
+        return res.status(409).json({
+          status: 'error',
+          message: error.message,
+          details: error.details,
+        });
+      }
+
       res.status(400).json({
         status: 'error',
         message: error.message,

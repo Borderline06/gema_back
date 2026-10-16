@@ -34,112 +34,75 @@ import { formatHoraUTC } from '../../shared/utils/date.util.js';
 // fecha original. 4 intentos = casi un mes de margen.
 const MAX_SALTOS_POR_FERIADO = 4;
 
-// 🤝 BL-010: cuántas ocurrencias semanales se prueban cuando la fecha choca con
-// una recuperación ya agendada.
-//
-// Es MÁS que MAX_SALTOS_POR_FERIADO a propósito: una clase que choca tiene que
-// poder saltar por encima de TODAS las demás fechas del propio ciclo (un ciclo
-// de 30 días tiene 4-5 ocurrencias) para aterrizar libre al final, que es la
-// misma semántica de "reposición al final del ciclo" que ya usa la
-// reprogramación masiva. Con 4 no alcanzaba para un ciclo de 5 clases.
-const MAX_SALTOS_POR_CHOQUE = 6;
-
 /**
- * 🤝 BL-010: reubica las fechas de un ciclo que choquen con una recuperación.
+ * 🤝 BL-010: detecta las fechas de un bloque de clases que coinciden EXACTAMENTE
+ * (mismo día + misma hora de inicio) con una recuperación PROGRAMADA del alumno.
  *
- * Una recuperación ocupa el slot del alumno (mismo día + misma hora). Si se
- * generara la clase regular ahí pasaría una de dos cosas, ambas malas:
- *   · el alumno aparece DOS veces en el turno de la agenda del coordinador, o
- *   · si la recuperación ya se marcó PRESENTE existe una fila física
- *     `[RECUPERACION]` en esa fecha, el @@unique([inscripcion_id, fecha]) la
- *     bloquea y `skipDuplicates` se come la clase regular sin avisar.
+ * Regla de negocio: el backend NO reubica ni omite nada. Un choque aborta la
+ * generación con un 409 (ver `lanzarSiHayChoques`) y el administrador decide.
  *
- * Regla de negocio: la clase NO se pierde, se corre a la siguiente ocurrencia
- * semanal LIBRE — libre significa sin choque y sin pisar otra fecha del mismo
- * ciclo, así que en la práctica aterriza al final, detrás de la última clase.
+ * Pura y sincrónica: nunca consulta ni lanza. El índice sale de
+ * `cargarSlotsRecuperacion`, que ya filtra por estado PROGRAMADA.
  *
- * ⚠️ PURA Y NO LANZA NUNCA. El llamador real corre dentro de la $transaction de
- * `validarPago`: un throw haría rollback del pago (dinero recibido, cuenta en
- * PENDIENTE). Si no encuentra hueco, omite la fecha y lo deja en el reporte.
- *
- * @returns {{fechas: Date[], choques: object[], omitidas: object[]}}
+ * @returns {{fecha: string, hora: string, recuperacion_id: number, estado_recuperacion: string}[]}
+ *   en orden cronológico
  */
-// 🧪 Se exporta ADEMÁS de usarse internamente: es la aritmética más delicada de
-// BL-010 y el repo no tenía un solo test. No forma parte de `asistenciaService`,
-// así que no toca ninguna superficie HTTP.
-export const reubicarFechasConChoque = ({ fechas, horaInicio, indiceRecuperaciones }) => {
-  const choques = [];
-  const omitidas = [];
-
+// 🧪 Se exporta para testearla sin base de datos. No forma parte de
+// `asistenciaService`, así que no toca ninguna superficie HTTP.
+export const detectarChoquesCiclo = ({ fechas, horaInicio, indiceRecuperaciones }) => {
   // Sin hora no hay slot que comparar (horario sin hora_inicio) y sin índice no
-  // hay nada que esquivar: se devuelve el plan original intacto.
+  // hay nada contra lo que chocar.
   if (!horaInicio || !indiceRecuperaciones || indiceRecuperaciones.porSlot.size === 0) {
-    return { fechas, choques, omitidas };
+    return [];
   }
 
-  // Todas las fechas planificadas del ciclo: una fecha corrida no puede
-  // aterrizar sobre otra clase del mismo ciclo (el @@unique la descartaría).
-  const planificadas = new Set(fechas.map((f) => claveDiaDesdeFecha(f)));
-  const ocupadas = new Set();
-  const fechasFinales = [];
+  const choques = [];
 
   for (const fecha of fechas) {
-    const claveOriginal = claveDiaDesdeFecha(fecha);
-    planificadas.delete(claveOriginal);
+    const choque = buscarChoqueRecuperacion(claveSlot(fecha, horaInicio), indiceRecuperaciones);
+    if (!choque) continue;
 
-    let candidata = fecha;
-    let saltos = 0;
-    let choque = buscarChoqueRecuperacion(claveSlot(candidata, horaInicio), indiceRecuperaciones);
-
-    while (choque && saltos < MAX_SALTOS_POR_CHOQUE) {
-      if (saltos === 0) {
-        choques.push({
-          fecha: claveOriginal,
-          hora: formatHoraUTC(horaInicio),
-          recuperacion_id: choque.id,
-          estado_recuperacion: choque.estado,
-        });
-      }
-
-      candidata = siguienteOcurrenciaSemanal(candidata);
-      saltos += 1;
-
-      const claveCandidata = claveDiaDesdeFecha(candidata);
-      const pisaOtraClase = planificadas.has(claveCandidata) || ocupadas.has(claveCandidata);
-
-      choque = pisaOtraClase
-        ? // Marcador de "sigue buscando": no es un choque con recuperación, pero
-          // tampoco es un hueco válido.
-          { id: null, estado: 'OCUPADO_POR_CICLO' }
-        : buscarChoqueRecuperacion(claveSlot(candidata, horaInicio), indiceRecuperaciones);
-    }
-
-    if (choque) {
-      // No se halló hueco en 6 semanas. Se omite la fecha (jamás se lanza) y
-      // queda en el reporte para que el admin lo resuelva a mano.
-      omitidas.push({
-        fecha: claveOriginal,
-        hora: formatHoraUTC(horaInicio),
-        motivo: 'SIN_HUECO_LIBRE',
-      });
-      continue;
-    }
-
-    const claveFinal = claveDiaDesdeFecha(candidata);
-    ocupadas.add(claveFinal);
-    if (saltos > 0) {
-      choques[choques.length - 1].fecha_reubicada = claveFinal;
-    }
-    fechasFinales.push(candidata);
+    choques.push({
+      fecha: claveDiaDesdeFecha(fecha),
+      hora: formatHoraUTC(horaInicio),
+      recuperacion_id: choque.id,
+      estado_recuperacion: choque.estado,
+    });
   }
 
-  // Orden cronológico: una fecha reubicada al final del ciclo conservaba la
-  // posición de la original dentro del array, y eso dejaba la lista
-  // desordenada para cualquiera que la lea (el reporte de la previsualización,
-  // o un futuro llamador que asuma orden).
-  fechasFinales.sort((a, b) => a.getTime() - b.getTime());
+  return choques.sort((a, b) => a.fecha.localeCompare(b.fecha));
+};
 
-  return { fechas: fechasFinales, choques, omitidas };
+/**
+ * 🤝 BL-010: convierte los choques en un 409 Conflict.
+ *
+ * Se lanza ANTES de insertar nada. Como los llamadores reales corren dentro de
+ * una `$transaction` (validarPago, updateInscripcion), el throw la revierte
+ * completa: el pago queda pendiente / el horario anterior se conserva.
+ *
+ * Forma del JSON (la arma error.middleware con ApiError):
+ *   { success: 'error', message,
+ *     details: { codigo, fecha, hora, inscripcion_id, choques: [...] } }
+ * `fecha`/`hora` son las del primer choque; `choques` los trae todos.
+ */
+export const lanzarSiHayChoques = (choques, inscripcionId) => {
+  if (!choques || choques.length === 0) return;
+
+  const [primero] = choques;
+  const [anio, mes, dia] = primero.fecha.split('-');
+  const resto = choques.length > 1 ? ` (+${choques.length - 1} choque(s) más)` : '';
+
+  throw new ApiError(
+    `Choque con una clase de recuperación ya programada: el ${dia}/${mes}/${anio} a las ${primero.hora}${resto}.`,
+    409,
+    {
+      codigo: 'CHOQUE_RECUPERACION',
+      fecha: primero.fecha,
+      hora: primero.hora,
+      inscripcion_id: inscripcionId ?? null,
+      choques,
+    }
+  );
 };
 
 export const asistenciaService = {
@@ -195,11 +158,11 @@ export const asistenciaService = {
         dia_semana,
         coordinador_id,
         fecha_inicio,
-        // 🤝 BL-010: se propagan para que la clase suelta también esquive el
-        // choque sin repetir la consulta.
+        // 🤝 BL-010: se propagan para que la clase suelta también se valide
+        // contra las recuperaciones sin repetir la consulta.
         alumno_id: alumnoId,
         hora_inicio: horaInicio,
-        choques: params.choques,
+        dryRun: params.dryRun,
       });
     }
 
@@ -245,38 +208,22 @@ export const asistenciaService = {
     const fechasPlanificadas = calcularProximasFechas(fechaInicioCalculo, dia_semana, fechaLimite);
 
     // =================================================================
-    // 🤝 BL-010: esquivar los slots que el alumno ya tiene ocupados por una
-    // recuperación agendada. Una sola consulta para las ~5 fechas del ciclo.
+    // 🤝 BL-010: si alguna fecha del ciclo coincide con una recuperación
+    // PROGRAMADA del alumno, se aborta con 409 ANTES de insertar nada. Una sola
+    // consulta para las ~5 fechas del ciclo.
     // =================================================================
     const indiceRecuperaciones = alumnoId ? await cargarSlotsRecuperacion(tx, alumnoId) : null;
 
-    const { fechas: fechasClases, choques, omitidas } = reubicarFechasConChoque({
-      fechas: fechasPlanificadas,
-      horaInicio,
-      indiceRecuperaciones,
-    });
+    lanzarSiHayChoques(
+      detectarChoquesCiclo({ fechas: fechasPlanificadas, horaInicio, indiceRecuperaciones }),
+      inscripcion_id
+    );
 
-    for (const choque of choques) {
-      console.warn(
-        `🤝 BL-010: inscripción ${inscripcion_id} choca con la recuperación ${choque.recuperacion_id} el ${choque.fecha} ${choque.hora}. Clase corrida al ${choque.fecha_reubicada ?? 'N/A'}.`
-      );
-    }
-    for (const omitida of omitidas) {
-      console.warn(
-        `⚠️ BL-010: inscripción ${inscripcion_id}: no se halló slot libre para la clase del ${omitida.fecha} en ${MAX_SALTOS_POR_CHOQUE} semanas. Se omite esa fecha para NO romper la transacción del pago.`
-      );
-    }
-
-    // 🚩 Reporte OPCIONAL por out-param: si el llamador pasó un array, se le
-    // empujan los choques. Así ningún llamador actual cambia y ninguna respuesta
-    // JSON existente gana llaves nuevas (regla de oro). `validarPago` NO lo pasa
-    // a propósito: ahí el choque solo se loguea.
-    if (Array.isArray(params.choques)) {
-      params.choques.push(...choques.map((c) => ({ ...c, inscripcion_id })));
-    }
+    // 🔍 `dryRun`: solo validar (ver `validarChoquesCiclo`). No inserta.
+    if (params.dryRun) return fechasPlanificadas.length;
 
     // 3. Preparamos los objetos para insertar
-    const datosAsistencia = fechasClases.map((fecha) => ({
+    const datosAsistencia = fechasPlanificadas.map((fecha) => ({
       inscripcion_id: inscripcion_id,
       fecha: fecha,
       estado: 'PROGRAMADA',
@@ -298,6 +245,19 @@ export const asistenciaService = {
 
     return datosAsistencia.length;
   },
+
+  /**
+   * 🤝 BL-010: pre-validación SIN efectos. Calcula exactamente las fechas que
+   * generaría `generarClasesFuturas` (misma ruta de código, vía `dryRun`) y
+   * lanza el 409 si alguna choca con una recuperación PROGRAMADA. No inserta.
+   *
+   * Existe para que `validarPago` falle ANTES de mutar nada (inscripción,
+   * ciclo, link), en vez de depender solo del rollback.
+   *
+   * @returns {Promise<number>} cantidad de clases que se generarían
+   */
+  validarChoquesCiclo: async (tx, params) =>
+    asistenciaService.generarClasesFuturas(tx, { ...params, dryRun: true }),
 
   obtenerHistorial: async (inscripcionId) => {
     return await prisma.registros_asistencia.findMany({
@@ -897,6 +857,11 @@ export const asistenciaService = {
    * venta abortaría la transacción del pago: dinero ya recibido, pago sin
    * aprobar y cuenta en PENDIENTE. La validación dura vive en
    * inscribirIndividual (antes de cobrar); acá solo se corre la fecha.
+   *
+   * 🤝 BL-010: SÍ lanza un 409 (ApiError) si la fecha final coincide con una
+   * recuperación PROGRAMADA del alumno. A diferencia del feriado, es un choque
+   * que el admin debe resolver, y validarPago lo pre-valida antes de mutar.
+   * `params.dryRun` valida sin insertar.
    */
   generarClaseUnica: async (tx, params) => {
     const {
@@ -949,8 +914,8 @@ export const asistenciaService = {
 
     // =================================================================
     // 🤝 BL-010: una clase suelta también puede caer sobre una recuperación ya
-    // agendada. Se resuelve DESPUÉS del feriado (primero el día no laborable,
-    // después el slot ocupado) y con la misma garantía: nunca lanza.
+    // agendada. Se valida DESPUÉS del feriado (primero el día no laborable,
+    // después el slot) y, si choca, se aborta con 409 antes de insertar.
     // =================================================================
     if (fechasClases.length > 0) {
       let alumnoId = params.alumno_id;
@@ -967,36 +932,15 @@ export const asistenciaService = {
 
       if (alumnoId) {
         const indiceRecuperaciones = await cargarSlotsRecuperacion(tx, alumnoId);
-        const resultado = reubicarFechasConChoque({
-          fechas: fechasClases,
-          horaInicio,
-          indiceRecuperaciones,
-        });
-
-        for (const choque of resultado.choques) {
-          console.warn(
-            `🤝 BL-010: la clase suelta de la inscripción ${inscripcion_id} choca con la recuperación ${choque.recuperacion_id} el ${choque.fecha} ${choque.hora}. Corrida al ${choque.fecha_reubicada ?? 'N/A'}.`
-          );
-        }
-
-        if (Array.isArray(params.choques)) {
-          params.choques.push(...resultado.choques.map((c) => ({ ...c, inscripcion_id })));
-        }
-
-        // ⚠️ Si no hubo hueco en 6 semanas, `reubicarFechasConChoque` devuelve
-        // la lista VACÍA. Para una clase suelta eso significaría un pago
-        // aprobado sin ninguna clase, así que se conserva la fecha original
-        // (mismo criterio que el fallback del feriado: es preferible el
-        // duplicado visible en la agenda a la clase inexistente).
-        if (resultado.fechas.length > 0) {
-          fechasClases = resultado.fechas;
-        } else {
-          console.warn(
-            `⚠️ BL-010: inscripción ${inscripcion_id}: clase suelta sin slot libre en ${MAX_SALTOS_POR_CHOQUE} semanas. Se deja la fecha original para NO dejar al alumno sin clase.`
-          );
-        }
+        lanzarSiHayChoques(
+          detectarChoquesCiclo({ fechas: fechasClases, horaInicio, indiceRecuperaciones }),
+          inscripcion_id
+        );
       }
     }
+
+    // 🔍 `dryRun`: solo validar (ver `validarChoquesCiclo`). No inserta.
+    if (params.dryRun) return fechasClases.length;
 
     const datosAsistencia = fechasClases.map((fecha) => ({
       inscripcion_id: inscripcion_id,
@@ -1029,7 +973,7 @@ export const asistenciaService = {
    * conflicto: el admin la usa para decidir antes de aprobar el pago.
    *
    * Reusa EXACTAMENTE la misma aritmética que la generación real
-   * (`calcularProximasFechas` + `reubicarFechasConChoque`), así que lo que
+   * (`calcularProximasFechas` + `detectarChoquesCiclo`), así que lo que
    * muestra es por construcción lo que va a pasar.
    */
   previsualizarChoquesRecuperacion: async ({ inscripcion_id, fecha_inicio }) => {
@@ -1067,7 +1011,7 @@ export const asistenciaService = {
 
     const indiceRecuperaciones = await cargarSlotsRecuperacion(prisma, inscripcion.alumno_id);
 
-    const { choques, omitidas } = reubicarFechasConChoque({
+    const choques = detectarChoquesCiclo({
       fechas: fechasPlanificadas,
       horaInicio: inscripcion.horarios_clases.hora_inicio,
       indiceRecuperaciones,
@@ -1081,7 +1025,9 @@ export const asistenciaService = {
       hay_choques: choques.length > 0,
       total_choques: choques.length,
       choques,
-      omitidas,
+      // Llave conservada (regla de oro): antes listaba fechas sin hueco al
+      // reubicar. Ya no se reubica nada, así que siempre va vacía.
+      omitidas: [],
     };
   }
 };

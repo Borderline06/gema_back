@@ -35,17 +35,17 @@ import { formatHoraUTC } from './date.util.js';
 /**
  * Estados de `recuperaciones` que OCUPAN el slot del alumno.
  *
- * Las `COMPLETADA_*` se incluyen a propósito: `COMPLETADA_PRESENTE` es
- * exactamente el estado que dejó la fila física `[RECUPERACION]` compitiendo
- * por el @@unique([inscripcion_id, fecha]) (fallo 2️⃣ de la cabecera).
- * Se excluyen `PENDIENTE` (ticket sin agendar: `fecha_programada` es NULL) y
- * `VENCIDA` (el alumno ya no va a asistir).
+ * Por regla de negocio del ticket, SOLO `PROGRAMADA` (estrictamente): es una
+ * clase futura ya agendada que chocaría con la nueva. Se excluyen `PENDIENTE`
+ * (sin agendar: `fecha_programada` es NULL), `VENCIDA` y las `COMPLETADA_*`.
+ *
+ * ⚠️ Riesgo conocido de excluir `COMPLETADA_PRESENTE`: si un ciclo retroactivo
+ * cae sobre una recuperación ya completada, la fila física `[RECUPERACION]`
+ * ocupa el @@unique([inscripcion_id, fecha]) y `skipDuplicates` descarta la
+ * clase regular (fallo 2️⃣ de la cabecera). Es consecuencia directa del criterio
+ * estricto; para cubrirlo bastaría añadir el estado a esta lista.
  */
-export const ESTADOS_RECUPERACION_OCUPAN_SLOT = Object.freeze([
-  'PROGRAMADA',
-  'COMPLETADA_PRESENTE',
-  'COMPLETADA_FALTA',
-]);
+export const ESTADOS_RECUPERACION_OCUPAN_SLOT = Object.freeze(['PROGRAMADA']);
 
 /**
  * Clave de slot: 'YYYY-MM-DDTHH:mm'.

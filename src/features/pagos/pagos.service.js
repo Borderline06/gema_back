@@ -191,6 +191,31 @@ export const pagosService = {
         }
       });
 
+      // =============================================================
+      // 🤝 BL-010: PRE-VALIDAR CHOQUES CON RECUPERACIONES ANTES DE MUTAR.
+      //
+      // Si alguna clase del ciclo (o la clase única) coincide con una
+      // recuperación PROGRAMADA del alumno, validarChoquesCiclo lanza un 409
+      // ANTES de tocar inscripción, link o clases. El throw revierte toda la
+      // $transaction: el pago queda pendiente y el admin decide qué hacer. La
+      // misma comprobación vive en los generadores, así que esto solo
+      // adelanta el fallo y le da al admin el error de TODO el paquete.
+      // =============================================================
+      for (const link of links) {
+        const insc = link.inscripciones;
+        if (insc.estado !== 'POR_VALIDAR') continue;
+
+        await asistenciaService.validarChoquesCiclo(tx, {
+          inscripcion_id: insc.id,
+          dia_semana: insc.horarios_clases.dia_semana,
+          coordinador_id: insc.horarios_clases.coordinador_id,
+          fecha_inicio: nuevoInicio ?? insc.fecha_inscripcion,
+          tipo_inscripcion: insc.tipo_inscripcion,
+          alumno_id: insc.alumno_id,
+          hora_inicio: insc.horarios_clases.hora_inicio,
+        });
+      }
+
       // 🆕 BL-006: a cuántas inscripciones se les aplicó de verdad la fecha.
       let inscripcionesConFechaAplicada = 0;
 
@@ -317,10 +342,8 @@ export const pagosService = {
             // 🚩 BL-001: ya tenemos la fila, así que le ahorramos la consulta a
             // la guardia de tipo de generarClasesFuturas.
             tipo_inscripcion: insc.tipo_inscripcion,
-            // 🤝 BL-010: idem para la detección de choques. NO se pasa `choques`
-            // a propósito: acá el choque solo se loguea, porque el response de
-            // validarPago no puede ganar llaves nuevas (regla de oro) y un throw
-            // haría rollback de un pago ya cobrado.
+            // 🤝 BL-010: idem para la detección de choques (409 si choca; ya
+            // pre-validado arriba, esto es la red de seguridad).
             alumno_id: insc.alumno_id,
             hora_inicio: insc.horarios_clases.hora_inicio,
           });

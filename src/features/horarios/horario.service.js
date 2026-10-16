@@ -2,6 +2,13 @@ import { prisma } from '../../config/database.config.js';
 import { ApiError } from '../../shared/utils/error.util.js';
 // 🎯 BL-001: NULL se asume REGULAR.
 import { TIPO_INSCRIPCION, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
+// 🎯 BL-003: /disponibilidad reusa las MISMAS reglas que la venta de clase suelta.
+import { ESTADOS_VALIDOS_PARA_CICLO, sumarDiasUTC } from '../../shared/utils/ciclo.util.js';
+import {
+  buscarFeriado,
+  cargarFeriadosActivos,
+  claveDiaDesdeFecha,
+} from '../../shared/utils/feriado.util.js';
 
 // §3.2 Prisma Selectivo — solo traemos los campos necesarios
 // 🆕 BL-004: exportado para que el pre-llenado de reinscripción devuelva los
@@ -148,6 +155,53 @@ export const formatearHorario = (h) => ({
     especializacion: null
   },
 });
+
+/**
+ * 🎯 BL-003: arma la disponibilidad por fecha. Puro y sincrónico (sin BD) para
+ * poder testearlo.
+ *
+ * Solo emite las fechas cuyo día de semana es el del horario (las únicas donde
+ * hay clase). Recorre en UTC: `desde`/`hasta` son días calendario, no instantes.
+ *
+ * `capacidad_max || 20` es el mismo fallback de `validarAforoFechaClase`, y
+ * `disponible` es su misma condición (`ocupados < capacidad`), más el feriado
+ * que `validarFechaNoFeriado` también rechaza.
+ *
+ * @param {{dia_semana:number, capacidad_max:number|null}} horario
+ * @param {string} desde 'YYYY-MM-DD'
+ * @param {string} hasta 'YYYY-MM-DD'
+ * @param {Map<string, number>} conteos 'YYYY-MM-DD' -> ocupados
+ * @param {object|null} indiceFeriados de `cargarFeriadosActivos`
+ */
+export const construirDisponibilidad = ({ horario, desde, hasta, conteos, indiceFeriados }) => {
+  const capacidad = horario.capacidad_max || 20;
+  const fin = new Date(`${hasta}T00:00:00.000Z`);
+  const resultado = [];
+
+  for (
+    let dia = new Date(`${desde}T00:00:00.000Z`);
+    dia <= fin;
+    dia = sumarDiasUTC(dia, 1)
+  ) {
+    // dia_semana: 1 (lunes) .. 7 (domingo); getUTCDay: 0 (domingo) .. 6.
+    const diaSemana = dia.getUTCDay() === 0 ? 7 : dia.getUTCDay();
+    if (diaSemana !== horario.dia_semana) continue;
+
+    const clave = claveDiaDesdeFecha(dia);
+    const ocupados = conteos.get(clave) ?? 0;
+    const esFeriado = !!buscarFeriado(clave, indiceFeriados);
+
+    resultado.push({
+      fecha: clave,
+      ocupados,
+      capacidad_max: capacidad,
+      disponible: ocupados < capacidad && !esFeriado,
+      es_feriado: esFeriado,
+    });
+  }
+
+  return resultado;
+};
 
 export const horarioService = {
   getAllHorarios: async () => {
@@ -394,5 +448,36 @@ export const horarioService = {
       select: HORARIO_SELECT,
     });
     return horarios.map(formatearHorario);
+  },
+
+  getDisponibilidad: async (id, desde, hasta) => {
+    const horario = await prisma.horarios_clases.findUnique({
+      where: { id: Number(id) },
+      select: { id: true, dia_semana: true, capacidad_max: true },
+    });
+
+    if (!horario) throw new ApiError('El horario especificado no existe', 404);
+
+    // Mismo conteo que `validarAforoFechaClase`, pero agrupado por fecha para
+    // resolver todo el rango en una sola consulta.
+    const [grupos, indiceFeriados] = await Promise.all([
+      prisma.registros_asistencia.groupBy({
+        by: ['fecha'],
+        where: {
+          fecha: {
+            gte: new Date(`${desde}T00:00:00.000Z`),
+            lte: new Date(`${hasta}T00:00:00.000Z`),
+          },
+          estado: { in: ESTADOS_VALIDOS_PARA_CICLO },
+          inscripciones: { horario_id: horario.id },
+        },
+        _count: { _all: true },
+      }),
+      cargarFeriadosActivos(prisma),
+    ]);
+
+    const conteos = new Map(grupos.map((g) => [claveDiaDesdeFecha(g.fecha), g._count._all]));
+
+    return construirDisponibilidad({ horario, desde, hasta, conteos, indiceFeriados });
   }
 };

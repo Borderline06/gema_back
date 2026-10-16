@@ -516,6 +516,13 @@ export const inscripcionService = {
             niveles_entrenamiento: true,
             coordinadores: { include: { usuarios: true } }
           }
+        },
+        // 🎯 BL-001: la fecha exacta de una clase única vive en el link de deuda
+        // (inicio = fin = día de la clase); el front de cambio de horario la necesita.
+        inscripciones_deudas_link: {
+          select: { fecha_inicio_ciclo: true, fecha_fin_ciclo: true },
+          orderBy: { creado_en: 'desc' },
+          take: 1
         }
       }
     });
@@ -870,7 +877,8 @@ export const inscripcionService = {
   },
 
   updateInscripcion: async (data) => {
-    const { alumnoId, inscripcionId, horarioId, adminId } = data;
+    // fechaClase ('YYYY-MM-DD'): solo para INDIVIDUAL, fecha exacta elegida por el admin.
+    const { alumnoId, inscripcionId, horarioId, adminId, fechaClase } = data;
 
     if (!alumnoId) throw new ApiError('El campo alumnoId es requerido', 400);
     if (!inscripcionId) throw new ApiError('El campo inscripcionId es requerido', 400);
@@ -928,10 +936,29 @@ export const inscripcionService = {
       // única clase en el horario destino y la validamos como en la venta.
       const esInscripcionIndividual = esIndividual(insc);
       let fechaClaseDestino = null;
+      // Fecha de arranque de la nueva inscripción: la original, salvo que el
+      // admin elija una fecha exacta (ver más abajo).
+      let inicioNuevaInscripcion = insc.fecha_inscripcion_original;
+
+      if (fechaClase && !esInscripcionIndividual) {
+        throw new ApiError('fechaClase solo aplica a inscripciones de clase única.', 400);
+      }
 
       if (esInscripcionIndividual) {
+        if (fechaClase) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaClase)) {
+            throw new ApiError('fechaClase debe tener formato YYYY-MM-DD.', 400);
+          }
+          if (fechaClase < dayjs().tz(TZ_LIMA).format('YYYY-MM-DD')) {
+            throw new ApiError('⛔ La fecha de la clase no puede estar en el pasado.', 400);
+          }
+          // Mismo anclaje (12:00 Lima) que inscribirIndividual, para que la
+          // fecha validada sea la que luego inserta generarClaseUnica.
+          inicioNuevaInscripcion = dayjs.tz(fechaClase, TZ_LIMA).hour(12).toDate();
+        }
+
         fechaClaseDestino = calcularPrimeraFechaClase(
-          insc.fecha_inscripcion_original,
+          inicioNuevaInscripcion,
           horarioDestino.dia_semana
         );
         if (!fechaClaseDestino) {
@@ -940,7 +967,16 @@ export const inscripcionService = {
             400
           );
         }
+        // Con fecha exacta no se admite que la ventana "salte" a otro día:
+        // la fecha pedida debe caer en el día de semana del horario destino.
+        if (fechaClase && dayjs(fechaClaseDestino).tz(TZ_LIMA).format('YYYY-MM-DD') !== fechaClase) {
+          throw new ApiError(
+            '⛔ La fecha elegida no corresponde al día de semana del horario destino.',
+            400
+          );
+        }
         await Validators.validarFechaNoFeriado(tx, fechaClaseDestino);
+        await Validators.validarAforoFechaClase(tx, horarioDestino, fechaClaseDestino);
       }
 
       const count = await asistenciaService.eliminarClases(tx, insc.id, insc.fecha_inscripcion_original);
@@ -959,8 +995,8 @@ export const inscripcionService = {
         data: {
           alumno_id: insc.alumno_id,
           horario_id: horarioId,
-          fecha_inscripcion: insc.fecha_inscripcion_original, //Para asegurar que se reinicie la fecha de inscripción con la original (PARA CASOS AISLADOS DE REPROGRAMACIÓN MASIVA)
-          fecha_inscripcion_original: insc.fecha_inscripcion_original,
+          fecha_inscripcion: inicioNuevaInscripcion, //Para asegurar que se reinicie la fecha de inscripción con la original (PARA CASOS AISLADOS DE REPROGRAMACIÓN MASIVA)
+          fecha_inscripcion_original: inicioNuevaInscripcion,
           estado: insc.estado,
           actualizado_en: new Date(),
           creado_en: insc.creado_en,

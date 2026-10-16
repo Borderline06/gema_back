@@ -50,6 +50,26 @@ erDiagram
 | `POST` | `/api/horarios` | Admin/Coord | Crear horario (valida solapamientos) |
 | `PUT` | `/api/horarios/:id` | Admin/Coord | Actualizar horario (update parcial + solapamientos) |
 | `DELETE` | `/api/horarios/:id` | Admin | Soft delete (activo → false) |
+| `GET` | `/api/horarios/:id/disponibilidad?desde&hasta` | Autenticado | Cupos por fecha (BL-003, calendario de clase única) |
+
+### `GET /api/horarios/:id/disponibilidad`
+
+Query: `desde`, `hasta` (`YYYY-MM-DD`, obligatorios, `hasta >= desde`, máx. 92 días).
+Devuelve **solo las fechas cuyo día de semana es el del horario**. `ocupados` usa el mismo conteo que `validarAforoFechaClase` (`registros_asistencia` PRESENTE/FALTA/PROGRAMADA del horario en esa fecha); `capacidad_max` aplica el fallback `|| 20`; `disponible = ocupados < capacidad_max && !es_feriado`.
+
+```json
+{
+  "success": true,
+  "message": "Disponibilidad obtenida exitosamente",
+  "data": [
+    { "fecha": "2026-10-20", "ocupados": 7, "capacidad_max": 8, "disponible": true,  "es_feriado": false },
+    { "fecha": "2026-10-27", "ocupados": 8, "capacidad_max": 8, "disponible": false, "es_feriado": false }
+  ]
+}
+```
+
+Errores: `400` query inválida / rango excedido, `401` sin token, `404` horario inexistente.
+> No incluye el chequeo global de `validarAforoHorario` (inscripciones del horario sin fecha) que `inscribirIndividual` aplica además.
 
 ---
 
