@@ -55,7 +55,7 @@ export const inscripcionService = {
   // 🚀 MOTOR MAESTRO DE INSCRIPCIÓN: GEMA ACADEMY (VERSIÓN FINAL)
   // =================================================================
   inscribirPaquete: async (data) => {
-    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta } = data;
+    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta, forzar_concepto_vigente } = data;
 
     try {
       // 1. Validación de estructura de entrada (Utils sigue sirviendo)
@@ -75,7 +75,8 @@ export const inscripcionService = {
           where: {
             cantidad_clases_semanal: horario_ids.length,
             activo: true,
-            es_vigente: !esAlumnoLegacy
+            // BL-004: la renovación histórica fuerza el concepto vigente actual.
+            es_vigente: forzar_concepto_vigente ? true : !esAlumnoLegacy
           }
         });
 
@@ -227,6 +228,7 @@ export const inscripcionService = {
         return {
           mensaje: 'Inscripción procesada exitosamente.',
           total_a_pagar: montoActualizado,
+          cuenta_id: nuevaCuenta.id,
           inscripciones: inscripcionesCreadas
         };
       });
@@ -1236,7 +1238,8 @@ export const inscripcionService = {
   // reinscribe). inscribirPaquete crea UNA cuenta por paquete, así que la
   // cuenta sí sobrevive como agrupador.
   // =================================================================
-  obtenerUltimoPlanAlumno: async (alumnoId) => {
+  obtenerUltimoPlanAlumno: async (alumnoId, cuentaId = null) => {
+    // BL-004: cuentaId opcional -> reconstruye ESE paquete histórico en vez del último.
     const idAlumno = Number.parseInt(alumnoId);
 
     const sinPlan = {
@@ -1263,7 +1266,10 @@ export const inscripcionService = {
     // llevarían el primer puesto. Es el mismo problema que compararInicioCicloAsc
     // corrige en el historial. creado_en tiene @default(now()), nunca es null.
     const ultimoLink = await prisma.inscripciones_deudas_link.findFirst({
-      where: { inscripciones: whereRegular },
+      where: {
+        inscripciones: whereRegular,
+        ...(cuentaId ? { cuenta_id: Number.parseInt(cuentaId) } : {}),
+      },
       orderBy: { creado_en: 'desc' },
       include: {
         cuentas_por_cobrar: { include: { catalogo_conceptos: true } },
