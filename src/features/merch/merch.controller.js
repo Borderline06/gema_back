@@ -37,6 +37,24 @@ export const merchController = {
     return apiResponse.created(res, { data, message: data.mensaje });
   }),
 
+  // Orden generada por el alumno: devuelve cuenta_id para abrir el modal de pagos estándar.
+  crearOrden: catchAsync(async (req, res) => {
+    if (req.user?.rol_nombre === 'Alumno' && req.body.alumno_id !== req.user.id) {
+      throw new ApiError('No puedes generar una orden a nombre de otro alumno.', 403);
+    }
+    const data = await merchService.crearOrden(req.body);
+    return apiResponse.created(res, { data, message: data.mensaje });
+  }),
+
+  // Arrepentimiento: el alumno cancela su orden PENDIENTE (:id = cuenta_id de la orden).
+  cancelarOrden: catchAsync(async (req, res) => {
+    const data = await merchService.cancelarOrden(req.params.id, {
+      id: req.user.id,
+      rol: req.user.rol_nombre,
+    });
+    return apiResponse.success(res, { data, message: data.mensaje });
+  }),
+
   cambiarEstadoItem: catchAsync(async (req, res) => {
     const data = await merchService.cambiarEstadoItem(req.params.id, req.body.estado_item);
     return apiResponse.success(res, { data, message: 'Estado del ítem actualizado' });

@@ -2,6 +2,12 @@ import { prisma } from '../../config/database.config.js';
 import { ApiError } from '../../shared/utils/error.util.js';
 import { aCentimos, aMonto, redondear2 } from '../../shared/utils/dinero.util.js';
 import { sincronizarPuenteDeuda } from '../../shared/utils/deuda-puente.util.js';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
+dayjs.extend(utc);
+dayjs.extend(timezone);
+const TZ_LIMA = 'America/Lima';
 import {
   ESTADO_ITEM,
   ESTADO_MERCH,
@@ -16,6 +22,15 @@ import {
 // Estados de un ítem que cuentan como ingreso de merch (RESERVADO aún no se
 // cobró y DEVUELTO se reembolsó).
 const ESTADOS_CON_INGRESO = [ESTADO_ITEM.POSEE, ESTADO_ITEM.PERDIDO];
+
+// Estados en los que una cuenta todavía le debe plata (o una validación) a la academia.
+const ESTADOS_CUENTA_ABIERTA = ['PENDIENTE', 'PARCIAL', 'POR_VALIDAR'];
+
+// Cuenta que existe SOLO por una orden de merch: tiene ítems y ningún link de matrícula.
+export const whereCuentaSoloMerch = {
+  alumno_merch: { some: {} },
+  inscripciones_deudas_link: { none: {} },
+};
 
 const enTransaccion = (tx, fn) => (tx ? fn(tx) : prisma.$transaction(fn));
 
@@ -230,6 +245,60 @@ export const merchService = {
     return count;
   },
 
+  /**
+   * Decisión única de merch al validar un pago (la llama validarPago):
+   *  - APROBADO y deuda en 0  -> RESERVADO pasa a POSEE.
+   *  - APROBADO con saldo     -> no pasa nada: sigue RESERVADO hasta completar el pago.
+   *  - RECHAZADO sin abonos aprobados previos (cuenta queda RECHAZADO) -> se libera la
+   *    reserva. Si ya había un abono aprobado (cuenta PARCIAL) se conserva: hay plata
+   *    pagada sobre esos ítems y el alumno puede reintentar el saldo.
+   */
+  procesarPagoValidado: async (tx, { cuentaId, pagoId, esAprobado, esPagoCompleto, nuevoEstadoDeuda }) => {
+    if (esAprobado) {
+      const confirmados = esPagoCompleto
+        ? await merchService.confirmarMerchDeCuenta(tx, cuentaId, pagoId)
+        : 0;
+      return { confirmados, liberados: 0 };
+    }
+    const liberados =
+      nuevoEstadoDeuda === 'PARCIAL' ? 0 : await merchService.liberarMerchDeCuenta(tx, cuentaId);
+    return { confirmados: 0, liberados };
+  },
+
+  /**
+   * Arrepentimiento: el alumno cancela su orden de merch PENDIENTE. Borra los
+   * ítems RESERVADO, repone el stock al instante y elimina la cuenta.
+   * `cuentaId` es el cuenta_id que devolvió POST /merch/orden.
+   */
+  cancelarOrden: async (cuentaId, solicitante, tx = null) => {
+    return enTransaccion(tx, async (db) => {
+      const cuenta = await db.cuentas_por_cobrar.findUnique({ where: { id: Number(cuentaId) } });
+      if (!cuenta) throw new ApiError('La orden no existe.', 404);
+
+      if (solicitante.rol === 'Alumno' && cuenta.alumno_id !== solicitante.id) {
+        throw new ApiError('No puedes cancelar la orden de otro alumno.', 403);
+      }
+      if (!(await merchService.esCuentaSoloMerch(db, cuenta.id))) {
+        throw new ApiError('La cuenta indicada no es una orden de merch.', 409);
+      }
+      if (cuenta.estado !== 'PENDIENTE') {
+        throw new ApiError(
+          `Solo se puede cancelar una orden PENDIENTE (esta está ${cuenta.estado}). Si ya enviaste un voucher, espera a que lo validemos.`,
+          409
+        );
+      }
+      const pagos = await db.pagos.count({ where: { cuenta_id: cuenta.id } });
+      if (pagos > 0) {
+        throw new ApiError('La orden ya tiene un pago registrado y no se puede cancelar.', 409);
+      }
+
+      const liberados = await merchService.liberarMerchDeCuenta(db, cuenta.id);
+      await db.cuentas_por_cobrar.delete({ where: { id: cuenta.id } });
+
+      return { mensaje: 'Orden cancelada. El stock fue devuelto.', cuenta_id: cuenta.id, items_liberados: liberados };
+    });
+  },
+
   /** Pago rechazado / cuenta vencida o borrada: devuelve el stock y quita las reservas. */
   liberarMerchDeCuenta: async (tx, cuentaId) => {
     const reservados = await tx.alumno_merch.findMany({
@@ -255,10 +324,134 @@ export const merchService = {
     return reservados.length;
   },
 
-  /** 'MIXTO' si la cuenta lleva merch, 'MATRICULA' si no (etiqueta del pago). */
+  /**
+   * Etiqueta del pago según lo que cobra la cuenta:
+   *   merch + matrícula -> 'MIXTO' · solo merch (orden del alumno) -> 'MERCH' · resto -> 'MATRICULA'.
+   */
   tipoTransaccionDeCuenta: async (tx, cuentaId) => {
     const merchEnCuenta = await tx.alumno_merch.count({ where: { cuenta_id: Number(cuentaId) } });
-    return merchEnCuenta > 0 ? TIPO_TRANSACCION.MIXTO : TIPO_TRANSACCION.MATRICULA;
+    if (merchEnCuenta === 0) return TIPO_TRANSACCION.MATRICULA;
+
+    const links = await tx.inscripciones_deudas_link.count({
+      where: { cuenta_id: Number(cuentaId) },
+    });
+    return links > 0 ? TIPO_TRANSACCION.MIXTO : TIPO_TRANSACCION.MERCH;
+  },
+
+  /** Monto de merch (reservado o poseído) que lleva una cuenta, en céntimos exactos. */
+  sumarMerchDeCuenta: async (tx, cuentaId) => {
+    const items = await tx.alumno_merch.findMany({
+      where: {
+        cuenta_id: Number(cuentaId),
+        estado_item: { in: [ESTADO_ITEM.RESERVADO, ESTADO_ITEM.POSEE] },
+      },
+      select: { monto_pagado: true },
+    });
+    return aMonto(items.reduce((acc, i) => acc + aCentimos(i.monto_pagado), 0));
+  },
+
+  /** true si la cuenta es una orden de merch sin matrícula (no toca inscripciones). */
+  esCuentaSoloMerch: async (tx, cuentaId) => {
+    const n = await tx.cuentas_por_cobrar.count({
+      where: { id: Number(cuentaId), ...whereCuentaSoloMerch },
+    });
+    return n > 0;
+  },
+
+  // ------------------------------------------------------- Orden del alumno
+  /**
+   * Orden de merch creada por el propio alumno. Reserva el stock y deja una
+   * cuenta PENDIENTE (48 h, igual que la matrícula) con los ítems RESERVADO.
+   * El alumno paga con el flujo estándar (POST /api/pagos/reportar con
+   * deuda_id = cuenta_id) y el admin la valida: ahí pasan a POSEE.
+   */
+  crearOrden: async ({ alumno_id, merch_ids }, tx = null) => {
+    return enTransaccion(tx, async (db) => {
+      const alumno = await db.alumnos.findUnique({ where: { usuario_id: Number(alumno_id) } });
+      if (!alumno) throw new ApiError('El alumno no existe.', 404);
+
+      // Una sola orden abierta por alumno: evita acaparar stock con reservas repetidas.
+      const abiertas = await db.cuentas_por_cobrar.count({
+        where: {
+          alumno_id: Number(alumno_id),
+          estado: { in: ESTADOS_CUENTA_ABIERTA },
+          ...whereCuentaSoloMerch,
+        },
+      });
+      if (abiertas > 0) {
+        throw new ApiError(
+          '⛔ Ya tienes una orden de merch pendiente. Págala o espera a que venza para crear otra.',
+          409
+        );
+      }
+
+      const { lineas, total } = await validarYDescontarStock(db, merch_ids);
+
+      const vence = dayjs().tz(TZ_LIMA).add(2, 'day').endOf('day');
+      const cuenta = await db.cuentas_por_cobrar.create({
+        data: {
+          alumno_id: Number(alumno_id),
+          // El admin lee este campo al validar el pago para saber qué entregar.
+          detalle_adicional: detalleMerch(lineas, 'Orden Merch'),
+          monto_final: total,
+          fecha_vencimiento: vence.toDate(), // 48 horas de reserva
+          estado: 'PENDIENTE',
+        },
+      });
+
+      await db.alumno_merch.createMany({
+        data: filasAlumnoMerch(lineas, {
+          alumno_id: Number(alumno_id),
+          cuenta_id: cuenta.id,
+          estado_item: ESTADO_ITEM.RESERVADO,
+        }),
+      });
+
+      await db.notificaciones.create({
+        data: {
+          alumno_id: Number(alumno_id),
+          titulo: '🛍️ Orden de Merch generada',
+          mensaje: `Reservamos tu pedido por S/ ${total.toFixed(2)}. Adjunta tu voucher antes del ${vence.format('DD/MM/YYYY')} para confirmarlo.`,
+          tipo: 'INFO',
+          categoria: 'VENTAS',
+        },
+      });
+
+      return {
+        mensaje: 'Orden de merch generada. Adjunta tu voucher para confirmarla.',
+        cuenta_id: cuenta.id,
+        total_a_pagar: total,
+        fecha_vencimiento: vence.toDate(),
+        items: lineas,
+      };
+    });
+  },
+
+  /**
+   * Cron: libera las órdenes de merch que vencieron sin pago. Sin esto la
+   * reserva retendría el stock para siempre (el Francotirador solo limpia
+   * cuentas con inscripciones). Solo toca cuentas PENDIENTE: una POR_VALIDAR
+   * ya tiene un voucher esperando al admin.
+   */
+  limpiarOrdenesVencidas: async (db = prisma) => {
+    const hoyLima = dayjs.tz(dayjs().tz(TZ_LIMA).format('YYYY-MM-DD'), TZ_LIMA).toDate();
+    const vencidas = await db.cuentas_por_cobrar.findMany({
+      where: { estado: 'PENDIENTE', fecha_vencimiento: { lt: hoyLima }, ...whereCuentaSoloMerch },
+      select: { id: true },
+    });
+
+    let liberadas = 0;
+    for (const { id } of vencidas) {
+      await db.$transaction(async (tx) => {
+        // Re-chequeo dentro de la transacción: pudo pagarse entre el findMany y acá.
+        const sigueAbierta = await tx.cuentas_por_cobrar.count({ where: { id, estado: 'PENDIENTE' } });
+        if (!sigueAbierta) return;
+        await merchService.liberarMerchDeCuenta(tx, id);
+        await tx.cuentas_por_cobrar.delete({ where: { id } });
+        liberadas += 1;
+      });
+    }
+    return liberadas;
   },
 
   // ------------------------------------------------------------ Estado de ítem

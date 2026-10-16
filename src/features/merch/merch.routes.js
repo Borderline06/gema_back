@@ -35,6 +35,22 @@ router.post(
   merchController.comprar
 );
 
+// Orden del alumno: reserva stock y deja una cuenta PENDIENTE para pagar con el flujo estándar.
+router.post(
+  '/orden',
+  authorize('Alumno', 'Administrador'),
+  validate(merchSchema.ordenSchema),
+  merchController.crearOrden
+);
+
+// Arrepentimiento: cancela la orden PENDIENTE (:id = cuenta_id) y devuelve el stock.
+router.delete(
+  '/orden/:id',
+  authorize('Alumno', 'Administrador'),
+  validateParams(merchSchema.idParamSchema),
+  merchController.cancelarOrden
+);
+
 // Gestión del catálogo.
 router.post(
   '/',

@@ -75,10 +75,14 @@ export const pagosService = {
         data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
       });
 
-      const inscripcionesUpdate = await tx.inscripciones.updateMany({
-        where: { alumno_id: deuda.alumno_id, estado: 'PENDIENTE_PAGO' },
-        data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
-      });
+      // 🛍️ El voucher de una orden de merch no debe asegurar cupos de una matrícula ajena.
+      const esOrdenMerch = tipoTransaccion === 'MERCH';
+      const inscripcionesUpdate = esOrdenMerch
+        ? { count: 0 }
+        : await tx.inscripciones.updateMany({
+            where: { alumno_id: deuda.alumno_id, estado: 'PENDIENTE_PAGO' },
+            data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
+          });
 
       return {
         success: true,
@@ -180,14 +184,22 @@ export const pagosService = {
       data: { estado: nuevoEstadoDeuda },
     });
 
+    // 🛍️ MERCH: la mercancía física solo se entrega con la deuda en 0. Un abono
+    // parcial NO pasa los ítems a POSEE (siguen RESERVADO); un rechazo sin abonos
+    // previos suelta la reserva y devuelve el stock.
+    await merchService.procesarPagoValidado(tx, {
+      cuentaId: pago.cuenta_id,
+      pagoId: pago.id,
+      esAprobado,
+      esPagoCompleto,
+      nuevoEstadoDeuda,
+    });
+
     // 🎓 PASO 6: GESTIÓN DE INSCRIPCIONES
     // 🚩 CAMBIO CLAVE: Quitamos la condición "&& esPagoCompleto"
     // Si 'activarAlumno' es true, significa que este pago (sea parcial o total) 
     // habilita al alumno para tener clases.
     if (activarAlumno) {
-
-      // 🛍️ MERCH: el pago aprobado convierte las reservas de la cuenta en POSEE.
-      await merchService.confirmarMerchDeCuenta(tx, pago.cuenta_id, pago.id);
 
       const links = await tx.inscripciones_deudas_link.findMany({
         where: { cuenta_id: pago.cuenta_id },
@@ -377,9 +389,6 @@ export const pagosService = {
       //   b) si no había historial aún, borrar de verdad una inscripción con
       //      meses de datos históricos del alumno.
       const esRenovacion = pago.cuentas_por_cobrar.detalle_adicional?.includes('RENOVACION');
-
-      // 🛍️ MERCH: pago rechazado = se suelta la reserva y vuelve el stock.
-      await merchService.liberarMerchDeCuenta(tx, pago.cuenta_id);
 
       if (esRenovacion) {
         // Revierte correctamente: restaura fecha original, reabre el link viejo,

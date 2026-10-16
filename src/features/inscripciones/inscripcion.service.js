@@ -8,6 +8,7 @@ import { ApiError } from '../../shared/utils/error.util.js';
 import { CuentasPorCobrarService } from '../cuenta_por_cobrar/cuentas_por_cobrar.service.js';
 import { pagosService } from '../pagos/pagos.service.js';
 import { merchService } from '../merch/merch.service.js';
+import { quitarDetalleMerch } from '../merch/logic/merch.logic.js';
 import { formatFechaEs } from '../../shared/utils/date.util.js';
 import {
   CLASES_POR_CICLO,
@@ -677,9 +678,16 @@ export const inscripcionService = {
 
           // 💰 BL-002: normalizado a 2 decimales, como en inscribirPaquete.
           let montoIndividual = redondear2(cpto.precio_base);
-          if (cuenta.detalle_adicional.toLowerCase().includes('camiseta')) {
+          // El flag legacy se busca fuera del segmento de merch: un producto del
+          // catálogo llamado "Camiseta ..." no debe sumar los S/ 50 del recargo viejo.
+          if (quitarDetalleMerch(cuenta.detalle_adicional).toLowerCase().includes('camiseta')) {
             montoIndividual = redondear2(montoIndividual + 50);
           }
+          // 🛍️ Esta función recalcula el monto desde el plan: el merch de la cuenta
+          // (matrícula + merch) debe conservarse o el alumno terminaría pagando de menos.
+          montoIndividual = redondear2(
+            montoIndividual + (await merchService.sumarMerchDeCuenta(tx, cuenta.id))
+          );
           const { monto_final } = await CuentasPorCobrarService.actualizar(tx, cuenta.id, {
             alumno_id: cuenta.alumno_id,
             concepto_id: cpto.id,

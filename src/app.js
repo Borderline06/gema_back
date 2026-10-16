@@ -87,6 +87,9 @@ app.use(
   })
 );
 app.use(cookieParser());
+// Merch recibe imágenes en Base64: el límite por defecto (100 kb) las rechazaría con 413.
+// Va ANTES del parser global; body-parser omite una petición que ya fue parseada.
+app.use('/api/merch', express.json({ limit: '12mb' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

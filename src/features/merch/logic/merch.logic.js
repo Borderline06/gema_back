@@ -70,9 +70,23 @@ export function construirLineas(pedido, catalogo) {
   return { lineas, total: aMonto(lineas.reduce((acc, l) => acc + aCentimos(l.subtotal), 0)) };
 }
 
-/** Texto para `detalle_adicional` de la cuenta, p. ej. "Merch: Polo x2, Gorra x1". */
-export function detalleMerch(lineas) {
-  return `Merch: ${lineas.map((l) => `${l.nombre} x${l.cantidad}`).join(', ')}`;
+/**
+ * Texto para `detalle_adicional` de la cuenta, p. ej. "Merch: Polo x2, Gorra x1".
+ * El admin lo lee en su panel para saber qué entregar; la orden del alumno usa el
+ * prefijo 'Orden Merch' ("Orden Merch: Camiseta Oficial GEMA x1, Gorra x2").
+ */
+export function detalleMerch(lineas, prefijo = 'Merch') {
+  return `${prefijo}: ${lineas.map((l) => `${l.nombre} x${l.cantidad}`).join(', ')}`;
+}
+
+const SEGMENTO_MERCH = /^(Orden )?Merch:/;
+
+/** Quita del detalle los segmentos de merch, para que sus nombres no se confundan con otros conceptos. */
+export function quitarDetalleMerch(detalle) {
+  return String(detalle ?? '')
+    .split(' | ')
+    .filter((segmento) => !SEGMENTO_MERCH.test(segmento.trim()))
+    .join(' | ');
 }
 
 /** Una fila `alumno_merch` por unidad, con el precio congelado. */

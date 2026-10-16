@@ -17,6 +17,8 @@ export const validarMuroDeDeuda = async (tx, alumnoId) => {
     where: {
       alumno_id: Number.parseInt(alumnoId),
       estado: { in: ['PENDIENTE', 'PARCIAL', 'POR_VALIDAR'] },
+      // 🛍️ Una orden de merch sin matrícula (ítems y ningún link) no bloquea inscribirse.
+      NOT: { alumno_merch: { some: {} }, inscripciones_deudas_link: { none: {} } },
     },
   });
 

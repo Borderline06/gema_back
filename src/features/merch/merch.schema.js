@@ -6,6 +6,10 @@ const idPositivo = (nombre) =>
     .int(`${nombre} debe ser un entero`)
     .positive(`${nombre} debe ser mayor a 0`);
 
+// imagen_url admite una URL o una imagen en Base64 (data URI): columna TEXT, sin tope de 255.
+// El techo es solo un guardarraíl (~7.5 MB de imagen) que va por debajo del límite del body.
+const MAX_IMAGEN_CHARS = 10_000_000;
+
 const productoBase = {
   nombre: z.string().trim().min(2, 'El nombre debe tener al menos 2 caracteres').max(150),
   descripcion: z.string().trim().max(2000).nullable().optional(),
@@ -13,7 +17,12 @@ const productoBase = {
     .number({ invalid_type_error: 'El precio debe ser numérico' })
     .nonnegative('El precio no puede ser negativo')
     .max(99999999, 'Precio fuera de rango'),
-  imagen_url: z.string().trim().max(255).nullable().optional(),
+  imagen_url: z
+    .string()
+    .trim()
+    .max(MAX_IMAGEN_CHARS, 'La imagen es demasiado grande')
+    .nullable()
+    .optional(),
   stock: z.coerce.number().int('El stock debe ser un entero').nonnegative('El stock no puede ser negativo'),
   estado: z.enum(['ACTIVO', 'INACTIVO']),
 };
@@ -47,6 +56,14 @@ export const merchSchema = {
     metodo_pago_id: idPositivo('metodo_pago_id'),
     codigo_operacion: z.string().trim().max(50).optional(),
     notas: z.string().trim().max(200).optional(),
+  }),
+
+  ordenSchema: z.object({
+    alumno_id: idPositivo('alumno_id'),
+    merch_ids: z
+      .array(idPositivo('merch_ids'), { required_error: 'merch_ids es requerido' })
+      .min(1, 'Debes indicar al menos un producto')
+      .max(50, 'Demasiadas unidades en una sola orden'),
   }),
 
   estadoItemSchema: z.object({

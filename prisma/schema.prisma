@@ -248,7 +248,7 @@ model merch {
   nombre         String         @db.VarChar(150)
   descripcion    String?        @db.Text
   precio         Decimal        @db.Decimal(10, 2)
-  imagen_url     String?        @db.VarChar(255)
+  imagen_url     String?        @db.Text // URL o imagen en Base64
   stock          Int            @default(0)
   estado         String         @default("ACTIVO") @db.VarChar(10) // 'ACTIVO' | 'INACTIVO'
   creado_en      DateTime       @default(now()) @db.Timestamp(6)

@@ -10,6 +10,7 @@ import { congelamientoCronService } from '../../congelamientos/congelamiento-cro
 import { asistenciaCronService } from '../../asistencia/asistencia-cron.service.js';
 import { tokenCleanupService } from '../../auth/services/token-cleanup.service.js';
 import { claseCronService } from '../../clases/clase-cron.service.js';
+import { merchService } from '../../merch/merch.service.js';
 
 // 🔥 IMPORTAMOS DAYJS Y CONFIGURAMOS LIMA PARA LOS LOGS 🔥
 import dayjs from 'dayjs';
@@ -66,6 +67,20 @@ cron.schedule(
       await inscripcionCronService.limpiarRenovacionesAbandonadas();
     } catch (error) {
       logger.error('[CRON ERROR] Falló el Cobrador de Renovaciones Fantasma:', error);
+    }
+  },
+  { timezone: 'America/Lima' }
+);
+
+// Libera el stock de las órdenes de merch que vencieron sin pago (cada hora).
+cron.schedule(
+  '30 * * * *',
+  async () => {
+    try {
+      const liberadas = await merchService.limpiarOrdenesVencidas();
+      if (liberadas > 0) logger.info(`[CRON] Órdenes de merch vencidas liberadas: ${liberadas}`);
+    } catch (error) {
+      logger.error('[CRON ERROR] Falló la limpieza de órdenes de merch:', error);
     }
   },
   { timezone: 'America/Lima' }
