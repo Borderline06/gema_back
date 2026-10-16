@@ -9,7 +9,7 @@ import {
   claveDiaLima,
 } from '../../shared/utils/feriado.util.js';
 import { cargarSlotsRecuperacion } from '../../shared/utils/recuperacion-slot.util.js';
-import { reubicarFechasConChoque } from '../asistencia/asistencia.service.js';
+import { detectarChoquesCiclo, lanzarSiHayChoques } from '../asistencia/asistencia.service.js';
 
 // =================================================================
 // BL-006: ajuste de fecha de inicio de un paquete YA PAGADO.
@@ -256,28 +256,28 @@ export const ajusteFechaService = {
         porInsc.get(insc.id).claves.push(clave);
       }
 
-      // 3. BL-010: esquiva recuperaciones ya agendadas
+      // 3. BL-010: un choque con una recuperación aborta con 409 (el admin decide).
+      //    Se detecta ANTES de borrar nada; el throw revierte la transacción.
       const advertencias = [];
       const creados = [];
+      const choques = [];
+      let inscripcionChoque = null;
       for (const { insc, claves: clavesInsc } of porInsc.values()) {
         const indice = await cargarSlotsRecuperacion(tx, insc.alumno_id);
-        const { fechas, choques, omitidas } = reubicarFechasConChoque({
-          fechas: clavesInsc.map(aFechaClase),
+        const fechas = clavesInsc.map(aFechaClase);
+        const encontrados = detectarChoquesCiclo({
+          fechas,
           horaInicio: insc.horarios_clases.hora_inicio,
           indiceRecuperaciones: indice,
         });
-        for (const c of choques) {
-          advertencias.push(
-            c.fecha_reubicada
-              ? `La clase del ${c.fecha} chocaba con una recuperación (${c.hora}); se movió al ${c.fecha_reubicada}.`
-              : `La clase del ${c.fecha} chocaba con una recuperación (${c.hora}).`
-          );
-        }
-        for (const o of omitidas) {
-          advertencias.push(`No se halló horario libre para la clase del ${o.fecha}; se omitió.`);
-        }
+        if (encontrados.length && inscripcionChoque === null) inscripcionChoque = insc.id;
+        choques.push(...encontrados);
         for (const f of fechas) creados.push({ insc, fecha: f });
       }
+      lanzarSiHayChoques(
+        choques.sort((a, b) => a.fecha.localeCompare(b.fecha)),
+        inscripcionChoque
+      );
 
       // 4. Borra solo lo regenerable y crea lo nuevo
       let clasesEliminadas = 0;
