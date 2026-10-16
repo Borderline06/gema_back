@@ -9,9 +9,11 @@ import dayjs from 'dayjs';
 // duplicarla. Ver la cabecera de ese archivo: NO reescribir su aritmética a UTC.
 import {
   DIAS_VENTANA_INDIVIDUAL,
+  calcularFechasPorConteo,
   calcularProximasFechas,
   siguienteOcurrenciaSemanal,
 } from '../../shared/utils/clase-fecha.util.js';
+import { separarClasesParaCambio } from '../../shared/utils/cambio-horario.util.js';
 // 🔧 BL-001: el 30 estaba hardcodeado acá como cuarta copia de la constante.
 import { DIAS_CICLO, parsearFechaInicioCiclo } from '../../shared/utils/ciclo.util.js';
 import { ApiError } from '../../shared/utils/error.util.js';
@@ -244,6 +246,112 @@ export const asistenciaService = {
     );
 
     return datosAsistencia.length;
+  },
+
+  /**
+   * 🔢 Genera EXACTAMENTE `cantidad` clases, una por semana desde `fecha_inicio`,
+   * saltando feriados sin consumir cupo. Es la generación del cambio de horario
+   * (ver cambio-horario.util.js): el recurso son clases, no días calendario.
+   *
+   * No aplica la guardia INDIVIDUAL a propósito: el llamador (updateInscripcion)
+   * ya bifurca por tipo.
+   *
+   * 🤝 BL-010: lanza 409 ANTES de insertar si alguna fecha choca con una
+   * recuperación PROGRAMADA (la $transaction del llamador lo revierte todo).
+   *
+   * @returns {Promise<Date[]>} las fechas generadas, en orden. La última es el
+   *   fin real del ciclo.
+   */
+  generarClasesPorConteo: async (tx, params) => {
+    const { inscripcion_id, dia_semana, usuario_admin_id, coordinador_id, fecha_inicio, cantidad } =
+      params;
+
+    if (!Number.isInteger(cantidad) || cantidad <= 0) return [];
+    if (!fecha_inicio) {
+      throw new ApiError('Se requiere fecha_inicio para generar clases por conteo.', 400);
+    }
+
+    let alumnoId = params.alumno_id;
+    let horaInicio = params.hora_inicio;
+    if (alumnoId === undefined || horaInicio === undefined) {
+      const inscripcion = await tx.inscripciones.findUnique({
+        where: { id: inscripcion_id },
+        select: { alumno_id: true, horarios_clases: { select: { hora_inicio: true } } },
+      });
+      if (alumnoId === undefined) alumnoId = inscripcion?.alumno_id ?? null;
+      if (horaInicio === undefined) horaInicio = inscripcion?.horarios_clases?.hora_inicio ?? null;
+    }
+
+    const feriados = params.feriados ?? (await cargarFeriadosActivos(tx));
+    const fechas = calcularFechasPorConteo(fecha_inicio, dia_semana, cantidad, {
+      esFeriado: (fecha) => !!buscarFeriado(claveDiaDesdeFecha(fecha), feriados),
+    });
+
+    const indiceRecuperaciones = alumnoId ? await cargarSlotsRecuperacion(tx, alumnoId) : null;
+    lanzarSiHayChoques(
+      detectarChoquesCiclo({ fechas, horaInicio, indiceRecuperaciones }),
+      inscripcion_id
+    );
+
+    if (params.dryRun) return fechas;
+
+    await tx.registros_asistencia.createMany({
+      data: fechas.map((fecha) => ({
+        inscripcion_id,
+        fecha,
+        estado: 'PROGRAMADA',
+        registrado_por: coordinador_id,
+        comentario: `Generado auto (Cambio de horario, ${cantidad} clases) - Admin ID: ${usuario_admin_id}`,
+      })),
+      skipDuplicates: true,
+    });
+
+    console.log(
+      `✅ Cambio de horario: ${fechas.length} clases para ID ${inscripcion_id} (última: ${fechas[fechas.length - 1].toLocaleDateString()})`
+    );
+
+    return fechas;
+  },
+
+  /**
+   * 🔢 Primera mitad del cambio de horario REGULAR: separa las clases del ciclo
+   * actual en conservadas y a eliminar (ver `separarClasesParaCambio`), borra
+   * las segundas y devuelve cuántas clases ya consumió el alumno.
+   *
+   * `inicioCiclo` acota por abajo: las clases de ciclos anteriores de la misma
+   * inscripción no se tocan ni cuentan.
+   *
+   * @returns {Promise<{consumidas: number, eliminadas: number}>}
+   */
+  depurarClasesParaCambioHorario: async (tx, { inscripcion_id, inicioCiclo, claveEfectiva }) => {
+    const clases = await tx.registros_asistencia.findMany({
+      where: { inscripcion_id, fecha: { gte: inicioCiclo } },
+      select: { id: true, fecha: true, estado: true },
+    });
+
+    const { idsAEliminar, consumidas } = separarClasesParaCambio(clases, claveEfectiva);
+
+    if (idsAEliminar.length > 0) {
+      await tx.registros_asistencia.deleteMany({ where: { id: { in: idsAEliminar } } });
+    }
+
+    return { consumidas, eliminadas: idsAEliminar.length };
+  },
+
+  /**
+   * 🔢 Segunda mitad: las clases conservadas pasan a la inscripción nueva, que es
+   * la dueña del link del ciclo. Sin esto el ciclo vigente quedaría con las
+   * clases ya dictadas colgando de una inscripción FINALIZADA.
+   *
+   * Seguro contra @@unique([inscripcion_id, fecha]): se llama antes de generar
+   * las clases nuevas, así que la inscripción destino está vacía.
+   */
+  trasladarClasesDelCiclo: async (tx, { desde, hacia, inicioCiclo }) => {
+    const { count } = await tx.registros_asistencia.updateMany({
+      where: { inscripcion_id: desde, fecha: { gte: inicioCiclo } },
+      data: { inscripcion_id: hacia },
+    });
+    return count;
   },
 
   /**

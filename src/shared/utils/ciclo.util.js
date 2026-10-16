@@ -30,6 +30,12 @@ export const TZ_LIMA = 'America/Lima';
 // regla del badge de la tabla de alumnos.
 export const DIAS_CICLO = 30;
 
+// Lo que se vende es CLASES, no días calendario: el plan mensual de 1 día a la
+// semana garantiza exactamente 5 clases por ciclo. DIAS_CICLO (30) es solo el
+// cierre administrativo que aplica el VERDUGO; un cambio de horario genera por
+// conteo contra esta constante (ver cambio-horario.util.js).
+export const CLASES_POR_CICLO = 5;
+
 // 🎯 BL-001: una inscripción INDIVIDUAL es una clase suelta, no un ciclo.
 // Su "ciclo" dura el día de la clase, así que el cron de individuales cierra
 // fecha_fin_ciclo en la fecha de esa clase en vez de a los 30 días.

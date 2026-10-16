@@ -9,6 +9,7 @@ import { CuentasPorCobrarService } from '../cuenta_por_cobrar/cuentas_por_cobrar
 import { pagosService } from '../pagos/pagos.service.js';
 import { formatFechaEs } from '../../shared/utils/date.util.js';
 import {
+  CLASES_POR_CICLO,
   ESTADOS_VALIDOS_PARA_CICLO,
   aFechaUTC,
   cicloSolapaMes,
@@ -29,6 +30,10 @@ import {
   whereTipoInscripcion,
 } from '../../shared/utils/tipo-inscripcion.util.js';
 import { calcularPrimeraFechaClase } from '../../shared/utils/clase-fecha.util.js';
+// 🔢 Cambio de horario por conteo de clases.
+import { diasParaCubrirUltimaClase } from '../../shared/utils/cambio-horario.util.js';
+import { aplicarCorrimientoDeCiclo } from '../../shared/utils/reprogramacion-ciclo.util.js';
+import { claveDiaDesdeFecha, claveDiaLima } from '../../shared/utils/feriado.util.js';
 // 💰 BL-002: reparto de dinero en céntimos exactos y sincronización del puente.
 import { repartirMonto, redondear2 } from '../../shared/utils/dinero.util.js';
 import { sincronizarPuenteDeuda } from '../../shared/utils/deuda-puente.util.js';
@@ -977,8 +982,37 @@ export const inscripcionService = {
         await Validators.validarAforoFechaClase(tx, horarioDestino, fechaClaseDestino);
       }
 
-      const count = await asistenciaService.eliminarClases(tx, insc.id, insc.fecha_inscripcion_original);
-      console.log(`Se eliminaron ${count} registros de asistencia.`)
+      // 🔢 REGULAR: el cambio es por CONTEO de clases (ver cambio-horario.util.js).
+      // Ya no se borra todo el ciclo para regenerarlo: se conserva lo que el
+      // alumno ya consumió, se borra solo lo futuro del horario viejo, y abajo se
+      // generan CLASES_POR_CICLO − consumidas desde la fecha efectiva.
+      // INDIVIDUAL no cambia: es una sola clase.
+      let planCambio = null;
+      let inicioCicloUTC = null;
+      let claveEfectiva = null;
+
+      if (esInscripcionIndividual) {
+        const count = await asistenciaService.eliminarClases(tx, insc.id, insc.fecha_inscripcion_original);
+        console.log(`Se eliminaron ${count} registros de asistencia.`)
+      } else {
+        inicioCicloUTC = aFechaUTC(
+          linkAnterior.fecha_inicio_ciclo ?? insc.fecha_inscripcion_original ?? insc.fecha_inscripcion
+        );
+        // Rige desde hoy (Lima); si el ciclo aún no arrancó (BL-006 permite una
+        // fecha de inicio futura), desde su inicio.
+        const claveInicioCiclo = claveDiaDesdeFecha(inicioCicloUTC);
+        const claveHoy = claveDiaLima();
+        claveEfectiva = claveHoy > claveInicioCiclo ? claveHoy : claveInicioCiclo;
+
+        planCambio = await asistenciaService.depurarClasesParaCambioHorario(tx, {
+          inscripcion_id: insc.id,
+          inicioCiclo: inicioCicloUTC,
+          claveEfectiva,
+        });
+        console.log(
+          `Cambio de horario ${insc.id}: ${planCambio.eliminadas} clases futuras eliminadas, ${planCambio.consumidas} ya consumidas.`
+        );
+      }
 
       await tx.inscripciones.update({
         where: { alumno_id: insc.alumno_id, id: insc.id },
@@ -1010,7 +1044,7 @@ export const inscripcionService = {
         }
       })
 
-      await tx.inscripciones_deudas_link.create({
+      const nuevoLink = await tx.inscripciones_deudas_link.create({
         data: {
           inscripcion_id: createdInsc.id,
           cuenta_id: linkAnterior.cuenta_id,
@@ -1032,6 +1066,19 @@ export const inscripcionService = {
         }
       })
 
+      // 🔢 Las clases ya consumidas pasan a la inscripción nueva (dueña del link
+      // del ciclo). Va antes de generar: la destino tiene que estar vacía por el
+      // @@unique([inscripcion_id, fecha]).
+      if (planCambio) {
+        await asistenciaService.trasladarClasesDelCiclo(tx, {
+          desde: insc.id,
+          hacia: createdInsc.id,
+          inicioCiclo: inicioCicloUTC,
+        });
+      }
+
+      let inscripcionRespuesta = createdInsc;
+
       if (createdInsc.estado === 'ACTIVO') {
         // 🎯 BL-001: bifurcación por tipo. Antes se llamaba siempre a
         // generarClasesFuturas, generándole 30 días a las clases sueltas.
@@ -1047,34 +1094,78 @@ export const inscripcionService = {
             alumno_id: createdInsc.alumno_id,
             hora_inicio: createdInsc.horarios_clases.hora_inicio,
           })
+
+          // Solo la clase suelta: marca como PRESENTE lo que ya pasó. En REGULAR
+          // NO aplica, pisaría los FALTA reales de las clases conservadas.
+          const hoy = new Date()
+          hoy.setHours(12, 0, 0, 0)
+          await tx.registros_asistencia.updateMany({
+            where: {
+              inscripcion_id: createdInsc.id,
+              fecha: {
+                gte: createdInsc.fecha_inscripcion,
+                lt: hoy
+              }
+            },
+            data: {
+              estado: 'PRESENTE'
+            }
+          })
         } else {
-          await asistenciaService.generarClasesFuturas(tx, {
+          // 🔢 Pendientes = CLASES_POR_CICLO − consumidas, generadas por conteo
+          // desde la fecha efectiva, saltando feriados.
+          const pendientes = Math.max(0, CLASES_POR_CICLO - planCambio.consumidas);
+
+          const fechasNuevas = await asistenciaService.generarClasesPorConteo(tx, {
             inscripcion_id: createdInsc.id,
             dia_semana: createdInsc.horarios_clases.dia_semana,
             usuario_admin_id: Number.parseInt(adminId),
             coordinador_id: createdInsc.horarios_clases.coordinador_id,
-            fecha_inicio: createdInsc.fecha_inscripcion,
-            tipo_inscripcion: createdInsc.tipo_inscripcion,
+            fecha_inicio: dayjs.tz(claveEfectiva, TZ_LIMA).hour(12).toDate(),
+            cantidad: pendientes,
             // 🤝 BL-010: idem.
             alumno_id: createdInsc.alumno_id,
             hora_inicio: createdInsc.horarios_clases.hora_inicio,
           })
-        }
 
-        const hoy = new Date()
-        hoy.setHours(12, 0, 0, 0)
-        await tx.registros_asistencia.updateMany({
-          where: {
-            inscripcion_id: createdInsc.id,
-            fecha: {
-              gte: createdInsc.fecha_inscripcion,
-              lt: hoy
+          // 🚩 Fin de ciclo SIN escribir fecha_fin_ciclo (invariante BL-006, ver
+          // cambio-horario.util.js): si la última clase pasa del cierre
+          // derivado (+30 días del VERDUGO), se corre el ancla lo justo.
+          const ultimaClase = fechasNuevas[fechasNuevas.length - 1];
+          const dias = ultimaClase
+            ? diasParaCubrirUltimaClase(createdInsc.fecha_inscripcion, ultimaClase)
+            : 0;
+
+          if (dias > 0) {
+            const corrido = await aplicarCorrimientoDeCiclo(tx, {
+              link: nuevoLink,
+              inscripcionId: createdInsc.id,
+              dias,
+            });
+
+            // Link legacy sin fecha_inicio_ciclo: aplicarCorrimientoDeCiclo no
+            // puede moverlo, pero el VERDUGO solo mira fecha_inscripcion, así que
+            // se corre esa para no perder la última clase.
+            if (!corrido) {
+              await tx.inscripciones.update({
+                where: { id: createdInsc.id },
+                data: {
+                  fecha_inscripcion: sumarDiasUTC(createdInsc.fecha_inscripcion, dias),
+                  actualizado_en: new Date(),
+                },
+              });
             }
-          },
-          data: {
-            estado: 'PRESENTE'
+
+            console.log(
+              `Cambio de horario ${createdInsc.id}: última clase ${ultimaClase.toISOString().slice(0, 10)} pasa del cierre; ancla del ciclo corrida ${dias} día(s).`
+            );
+
+            inscripcionRespuesta = await tx.inscripciones.findUnique({
+              where: { id: createdInsc.id },
+              include: { horarios_clases: true },
+            });
           }
-        })
+        }
       }
 
       await tx.notificaciones.create({
@@ -1087,7 +1178,7 @@ export const inscripcionService = {
         }
       });
 
-      return createdInsc
+      return inscripcionRespuesta
     });
   },
   // ... al final de inscripcionService
