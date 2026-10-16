@@ -6,6 +6,7 @@ import * as Logic from './logic/pagos.logic.js';
 import * as Utils from './utils/pagos.util.js';
 import { notificacionesService } from '../notificaciones/notificaciones.service.js';
 import { inscripcionService } from '../inscripciones/inscripcion.service.js';
+import { merchService } from '../merch/merch.service.js';
 // 🎯 BL-001: una sola definición de "es individual" en todo el backend.
 import { esIndividual } from '../../shared/utils/tipo-inscripcion.util.js';
 // 🆕 BL-006: la fecha de inicio que manda el admin se normaliza con el mismo
@@ -53,8 +54,11 @@ export const pagosService = {
       const metodoPagoId = await Logic.resolverMetodoPagoId(tx, metodo_pago);
 
       // 📝 PASO C: CREAR EL REGISTRO DE PAGO
+      // 🛍️ MERCH: 'MIXTO' si la cuenta lleva merch reservado, 'MATRICULA' si no.
+      const tipoTransaccion = await merchService.tipoTransaccionDeCuenta(tx, deuda_id);
       const nuevoPago = await tx.pagos.create({
         data: {
+          tipo_transaccion: tipoTransaccion,
           cuenta_id: parseInt(deuda_id),
           metodo_pago_id: metodoPagoId,
           monto_pagado: parseFloat(monto),
@@ -181,6 +185,9 @@ export const pagosService = {
     // Si 'activarAlumno' es true, significa que este pago (sea parcial o total) 
     // habilita al alumno para tener clases.
     if (activarAlumno) {
+
+      // 🛍️ MERCH: el pago aprobado convierte las reservas de la cuenta en POSEE.
+      await merchService.confirmarMerchDeCuenta(tx, pago.cuenta_id, pago.id);
 
       const links = await tx.inscripciones_deudas_link.findMany({
         where: { cuenta_id: pago.cuenta_id },
@@ -370,6 +377,9 @@ export const pagosService = {
       //   b) si no había historial aún, borrar de verdad una inscripción con
       //      meses de datos históricos del alumno.
       const esRenovacion = pago.cuentas_por_cobrar.detalle_adicional?.includes('RENOVACION');
+
+      // 🛍️ MERCH: pago rechazado = se suelta la reserva y vuelve el stock.
+      await merchService.liberarMerchDeCuenta(tx, pago.cuenta_id);
 
       if (esRenovacion) {
         // Revierte correctamente: restaura fecha original, reabre el link viejo,

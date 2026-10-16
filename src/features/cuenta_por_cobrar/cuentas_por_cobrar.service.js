@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import crypto from 'crypto';
+import { merchService } from '../merch/merch.service.js';
 import { detectarRegimenAlumno } from '../inscripciones/logic/inscripcion.logic.js';
 import * as Validators from '../inscripciones/validators/inscripcion.validator.js';
 import { TZ_LIMA } from '../../shared/utils/ciclo.util.js';
@@ -166,7 +167,8 @@ export const CuentasPorCobrarService = {
     // PASO 3: Pagos
     await tx.pagos.deleteMany({ where: { cuenta_id: cuenta.id } });
 
-    // PASO 4: Borrado final
+    // PASO 4: Borrado final (el merch reservado devuelve su stock)
+    await merchService.liberarMerchDeCuenta(tx, cuenta.id);
     const resultado = await tx.cuentas_por_cobrar.delete({
       where: { id: cuenta.id },
     });

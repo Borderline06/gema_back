@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { ApiError } from '../../shared/utils/error.util.js';
+import { merchService } from '../merch/merch.service.js';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 const prisma = new PrismaClient();
 
@@ -293,10 +294,22 @@ export const movimientosFinancierosService = {
 
         const totalIngresosManuales = Number(ingresosManualesAgg._sum.monto || 0);
         const totalEgresos = Number(egresosAgg._sum.monto || 0);
-        const totalIngresos = totalIngresosAutomaticos + totalIngresosManuales;
+
+        // =========================================================
+        // 3. MERCH: las ventas sueltas (tipo_transaccion = 'MERCH') no tienen
+        // link de matrícula, así que el filtro del punto 1 las deja fuera. Se
+        // suman aparte para que cuenten en las ganancias totales. El merch
+        // vendido dentro de una matrícula ya viaja en ingresosAutomaticos.
+        // =========================================================
+        const totalMerchSuelto = await merchService.sumarPagosMerchSueltos(prisma);
+        const totalIngresos = totalIngresosAutomaticos + totalIngresosManuales + totalMerchSuelto;
+        const totalMerch = await merchService.sumarIngresosMerch(prisma);
 
         return {
             ingresos: totalIngresos,
+            // 🛍️ NUEVO (aditivo): métricas de merch aisladas.
+            ingresosMerch: totalMerch,          // todo el merch (suelto + dentro de matrículas)
+            ingresosMerchSuelto: totalMerchSuelto, // la parte que se sumó arriba
             // 🚩 NUEVO: desglose para que el frontend (o tú mismo debuggeando)
             // pueda ver de dónde viene cada sol, sin tener que adivinar.
             ingresosAutomaticos: totalIngresosAutomaticos,
@@ -334,6 +347,19 @@ export const movimientosFinancierosService = {
             ORDER BY mes;
         `;
  
+        // Ventas sueltas de merch (sin link de matrícula), agrupadas por mes de pago
+        const filasMerch = await prisma.$queryRaw`
+            SELECT
+                EXTRACT(MONTH FROM p.fecha_pago)::int AS mes,
+                SUM(p.monto_pagado) AS total
+            FROM pagos p
+            WHERE p.estado_validacion = 'APROBADO'
+              AND p.tipo_transaccion = 'MERCH'
+              AND p.fecha_pago BETWEEN ${fechaInicio} AND ${fechaFin}
+            GROUP BY EXTRACT(MONTH FROM p.fecha_pago)
+            ORDER BY mes;
+        `;
+
         // Movimientos manuales (ingreso/egreso), agrupados por mes y tipo
         const filasMovimientos = await prisma.$queryRaw`
             SELECT
@@ -354,7 +380,8 @@ export const movimientosFinancierosService = {
             ingresosPagos: 0,      // ingresos automáticos (pagos de alumnos)
             ingresosManuales: 0,   // movimientos manuales tipo INGRESO
             egresos: 0,            // movimientos manuales tipo EGRESO
-            totalIngresos: 0,      // ingresosPagos + ingresosManuales
+            ingresosMerch: 0,      // 🛍️ ventas sueltas de merch (tipo_transaccion 'MERCH')
+            totalIngresos: 0,      // ingresosPagos + ingresosManuales + ingresosMerch
             balance: 0             // totalIngresos - egresos
         }));
  
@@ -362,6 +389,10 @@ export const movimientosFinancierosService = {
             meses[Number(fila.mes) - 1].ingresosPagos = Number(fila.total);
         });
  
+        filasMerch.forEach(fila => {
+            meses[Number(fila.mes) - 1].ingresosMerch = Number(fila.total);
+        });
+
         filasMovimientos.forEach(fila => {
             const idx = Number(fila.mes) - 1;
             if (fila.tipo === 'INGRESO') meses[idx].ingresosManuales = Number(fila.total);
@@ -369,7 +400,7 @@ export const movimientosFinancierosService = {
         });
  
         meses.forEach(m => {
-            m.totalIngresos = m.ingresosPagos + m.ingresosManuales;
+            m.totalIngresos = m.ingresosPagos + m.ingresosManuales + m.ingresosMerch;
             m.balance = m.totalIngresos - m.egresos;
         });
  

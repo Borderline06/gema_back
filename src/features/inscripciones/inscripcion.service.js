@@ -7,6 +7,7 @@ import { asistenciaService } from '../asistencia/asistencia.service.js';
 import { ApiError } from '../../shared/utils/error.util.js';
 import { CuentasPorCobrarService } from '../cuenta_por_cobrar/cuentas_por_cobrar.service.js';
 import { pagosService } from '../pagos/pagos.service.js';
+import { merchService } from '../merch/merch.service.js';
 import { formatFechaEs } from '../../shared/utils/date.util.js';
 import {
   CLASES_POR_CICLO,
@@ -55,7 +56,9 @@ export const inscripcionService = {
   // 🚀 MOTOR MAESTRO DE INSCRIPCIÓN: GEMA ACADEMY (VERSIÓN FINAL)
   // =================================================================
   inscribirPaquete: async (data) => {
-    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta, forzar_concepto_vigente } = data;
+    // `incluye_camiseta` es el flag legacy (+S/ 50 fijos): se sigue aceptando.
+    // `merch_ids` (opcional) es el reemplazo: productos del catálogo de Merch.
+    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta, forzar_concepto_vigente, merch_ids } = data;
 
     try {
       // 1. Validación de estructura de entrada (Utils sigue sirviendo)
@@ -195,24 +198,24 @@ export const inscripcionService = {
           await tx.beneficios_pendientes.update({ where: { id: pendiente.id }, data: { usado: true } });
         }
 
-        // Actualizamos el monto final de la cuenta tras los beneficios
-        await tx.cuentas_por_cobrar.update({
-          where: { id: nuevaCuenta.id },
-          data: {
-            monto_final: montoActualizado,
-            estado: montoActualizado <= 0.01 ? 'PAGADA' : 'PENDIENTE'
-          }
-        });
-
+        // Actualizamos el monto final de la cuenta tras los beneficios y le
+        // sumamos el merch opcional (cobro combinado en UNA sola cuenta).
+        //
         // 🌉 BL-002 (FIX CENTRAL): el puente se escribió en el PASO 6 con el
         // precio de LISTA, porque los beneficios se resuelven recién acá. Antes
         // nadie lo re-equilibraba: monto_final quedaba descontado y
         // SUM(monto_asignado) se quedaba en el precio sin descuento para
-        // siempre. Solo entramos si hubo beneficios: sin ellos el PASO 6 ya
-        // dejó el puente cuadrado.
-        if (beneficiosEnCola.length > 0) {
-          await sincronizarPuenteDeuda(tx, nuevaCuenta.id, montoActualizado);
-        }
+        // siempre. cerrarCuentaConMerch re-equilibra el puente solo si hubo
+        // beneficios o merch: sin ellos el PASO 6 ya dejó el puente cuadrado.
+        const { montoFinal, merch: merchCombo } = await merchService.cerrarCuentaConMerch(tx, {
+          alumno_id,
+          cuenta_id: nuevaCuenta.id,
+          detalle_base: detalleCobro.join(' | '),
+          monto_matricula: montoActualizado,
+          hubo_beneficios: beneficiosEnCola.length > 0,
+          merch_ids,
+        });
+        montoActualizado = montoFinal;
 
         // 🔔 PASO 8: NOTIFICACIÓN
         await tx.notificaciones.create({
@@ -229,7 +232,10 @@ export const inscripcionService = {
           mensaje: 'Inscripción procesada exitosamente.',
           total_a_pagar: montoActualizado,
           cuenta_id: nuevaCuenta.id,
-          inscripciones: inscripcionesCreadas
+          inscripciones: inscripcionesCreadas,
+          // Llaves nuevas (aditivas): solo informan el merch del cobro combinado.
+          total_merch: merchCombo.total,
+          merch: merchCombo.lineas
         };
       });
 
@@ -791,7 +797,10 @@ export const inscripcionService = {
           });
         }
 
-        // 5. Borramos la deuda y sus relaciones
+        // 5. Borramos la deuda y sus relaciones (el merch reservado devuelve su stock)
+        for (const id of deudasId) {
+          await merchService.liberarMerchDeCuenta(tx, id);
+        }
         await tx.descuentos_aplicados.deleteMany({ where: { cuenta_id: { in: deudasId } } });
         await tx.cuentas_por_cobrar.deleteMany({ where: { id: { in: deudasId } } });
       }
@@ -849,6 +858,7 @@ export const inscripcionService = {
       await tx.inscripciones_deudas_link.deleteMany({ where: { cuenta_id: parseInt(cuentaId) } });
       await tx.descuentos_aplicados.deleteMany({ where: { cuenta_id: parseInt(cuentaId) } });
       await tx.pagos.deleteMany({ where: { cuenta_id: parseInt(cuentaId) } });
+      await merchService.liberarMerchDeCuenta(tx, parseInt(cuentaId));
       await tx.cuentas_por_cobrar.delete({ where: { id: parseInt(cuentaId) } });
 
       if (cuenta.detalle_adicional.includes('RENOVACION')) {

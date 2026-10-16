@@ -39,6 +39,7 @@ import feriadoRoutes from './features/feriados/feriado.routes.js';
 import cajaRoutes from './features/movimientos_financieros/movimientos-financieros.route.js';
 import historialAcademicoRoutes from './features/VistasEspecificas/historial_academico/historial_academico.routes.js'; // 🆕
 
+import merchRoutes from './features/merch/merch.routes.js';
 import anunciosBeneficio from './features/anunciosBeneficios/anunciosBeneficios.routes.js';
 
 const app = express();
@@ -122,6 +123,7 @@ app.use('/api/coordinadores', coordinadorRoutes);
 app.use('/api/feriados', feriadoRoutes);
 app.use('/api/anuncios-beneficios',anunciosBeneficio)
 app.use('/api/caja', cajaRoutes);
+app.use('/api/merch', merchRoutes);
 app.use('/api/historial-academico', historialAcademicoRoutes); // ya p elmer no me apures xd
 
 app.use(errorHandler);

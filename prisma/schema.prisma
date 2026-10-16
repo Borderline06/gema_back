@@ -37,6 +37,7 @@ model alumnos {
   solicitudes_lesion      solicitudes_lesion[]
   beneficios_pendientes   beneficios_pendientes[]
   notificaciones_sobre_mi notificaciones[]
+  alumno_merch            alumno_merch[]
 }
 
 model alumnos_contactos {
@@ -78,7 +79,7 @@ model congelamientos {
   fecha_fin           DateTime?           @db.Date
   dias_reconocidos    Int?                @default(0)
   estado              String?             @default("ACTIVO") @db.VarChar(20)
-  inscripciones       inscripciones?       @relation(fields: [inscripcion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  inscripciones       inscripciones?      @relation(fields: [inscripcion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   solicitudes_lesion  solicitudes_lesion? @relation(fields: [solicitud_lesion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
 }
 
@@ -107,6 +108,7 @@ model cuentas_por_cobrar {
   pagos                     pagos[]
   inscripciones_deudas_link inscripciones_deudas_link[]
   auditoria_ajuste_fecha    auditoria_ajuste_fecha[]
+  alumno_merch              alumno_merch[]
 }
 
 model direcciones {
@@ -152,7 +154,7 @@ model inscripciones {
   estado                     String?   @default("PENDIENTE_PAGO") @db.VarChar(20)
 
   // NUEVOS CAMPOS PARA CLASES SUELTAS
-  tipo_inscripcion   String?   @default("REGULAR") @db.VarChar(20) // 'REGULAR' o 'INDIVIDUAL'
+  tipo_inscripcion String? @default("REGULAR") @db.VarChar(20) // 'REGULAR' o 'INDIVIDUAL'
 
   actualizado_en       DateTime? @default(now()) @db.Timestamp(6)
   creado_en            DateTime? @default(now()) @db.Timestamp(6)
@@ -172,7 +174,7 @@ model movimientos_financieros {
   monto            Decimal  @db.Decimal(10, 2)
   concepto         String   @db.VarChar(150) // Ej: "Venta de camiseta", "Pago de luz"
   metodo_pago_id   Int?
-  sede_id          Int?     // <--- NUEVO CAMPO (Opcional)
+  sede_id          Int? // <--- NUEVO CAMPO (Opcional)
   fecha_movimiento DateTime @default(now()) @db.Timestamp(6)
   comprobante_url  String?  @db.VarChar(255)
   registrado_por   Int? // ID del administrador que registra el movimiento
@@ -185,16 +187,16 @@ model movimientos_financieros {
 }
 
 model inscripciones_deudas_link {
-  id                 Int                @id @default(autoincrement())
+  id                 Int       @id @default(autoincrement())
   inscripcion_id     Int
   cuenta_id          Int
-  monto_asignado     Decimal            @db.Decimal(10, 2)
-  creado_en          DateTime           @default(now()) @db.Timestamp(6)
-   // === CAMPOS NUEVOS ===
-  fecha_inicio_ciclo DateTime?          @db.Date   // arranca nullable, se llena en el backfill
-  fecha_fin_ciclo    DateTime?          @db.Date   // null = ciclo vigente (todavía activo)
-  es_estimado        Boolean            @default(false) // true = viene del backfill, no de captura en vivo
-  
+  monto_asignado     Decimal   @db.Decimal(10, 2)
+  creado_en          DateTime  @default(now()) @db.Timestamp(6)
+  // === CAMPOS NUEVOS ===
+  fecha_inicio_ciclo DateTime? @db.Date // arranca nullable, se llena en el backfill
+  fecha_fin_ciclo    DateTime? @db.Date // null = ciclo vigente (todavía activo)
+  es_estimado        Boolean   @default(false) // true = viene del backfill, no de captura en vivo
+
   inscripciones      inscripciones      @relation(fields: [inscripcion_id], references: [id], onDelete: Cascade)
   cuentas_por_cobrar cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: Cascade)
 
@@ -219,20 +221,58 @@ model niveles_entrenamiento {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model pagos {
-  id                 Int                @id @default(autoincrement())
-  cuenta_id          Int
-  metodo_pago_id     Int
-  monto_pagado       Decimal            @db.Decimal(10, 2)
-  url_comprobante    String?            @db.VarChar(255)
-  codigo_operacion   String?            @db.VarChar(50)
-  fecha_pago         DateTime?          @default(now()) @db.Timestamp(6)
-  estado_validacion  String?            @default("PENDIENTE") @db.VarChar(20)
-  revisado_por       Int?
-  comprobante_enviado Boolean?          @default(false)
-  notas_validacion   String?            @db.VarChar(200)
-  cuentas_por_cobrar cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  metodos_pago       metodos_pago       @relation(fields: [metodo_pago_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  administrador      administrador?     @relation(fields: [revisado_por], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
+  id                  Int                @id @default(autoincrement())
+  cuenta_id           Int
+  metodo_pago_id      Int
+  monto_pagado        Decimal            @db.Decimal(10, 2)
+  url_comprobante     String?            @db.VarChar(255)
+  codigo_operacion    String?            @db.VarChar(50)
+  fecha_pago          DateTime?          @default(now()) @db.Timestamp(6)
+  estado_validacion   String?            @default("PENDIENTE") @db.VarChar(20)
+  revisado_por        Int?
+  comprobante_enviado Boolean?           @default(false)
+  notas_validacion    String?            @db.VarChar(200)
+  // 'MATRICULA' (default) | 'MERCH' (venta suelta) | 'MIXTO' (matrícula + merch)
+  tipo_transaccion    String             @default("MATRICULA") @db.VarChar(20)
+  cuentas_por_cobrar  cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  metodos_pago        metodos_pago       @relation(fields: [metodo_pago_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  administrador       administrador?     @relation(fields: [revisado_por], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
+  alumno_merch        alumno_merch[]
+
+  @@index([tipo_transaccion])
+}
+
+// Catálogo de merchandising (reemplaza el flag estático "incluye_camiseta").
+model merch {
+  id             Int            @id @default(autoincrement())
+  nombre         String         @db.VarChar(150)
+  descripcion    String?        @db.Text
+  precio         Decimal        @db.Decimal(10, 2)
+  imagen_url     String?        @db.VarChar(255)
+  stock          Int            @default(0)
+  estado         String         @default("ACTIVO") @db.VarChar(10) // 'ACTIVO' | 'INACTIVO'
+  creado_en      DateTime       @default(now()) @db.Timestamp(6)
+  actualizado_en DateTime       @default(now()) @db.Timestamp(6)
+  alumno_merch   alumno_merch[]
+}
+
+// Colección del alumno: una fila por unidad adquirida.
+model alumno_merch {
+  id                 Int                 @id @default(autoincrement())
+  alumno_id          Int
+  merch_id           Int
+  cuenta_id          Int?
+  pago_id            Int?
+  fecha_adquisicion  DateTime            @default(now()) @db.Timestamp(6)
+  monto_pagado       Decimal             @db.Decimal(10, 2) // precio congelado al comprar
+  estado_item        String              @default("POSEE") @db.VarChar(15) // RESERVADO | POSEE | PERDIDO | DEVUELTO
+  alumnos            alumnos             @relation(fields: [alumno_id], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
+  merch              merch               @relation(fields: [merch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  cuentas_por_cobrar cuentas_por_cobrar? @relation(fields: [cuenta_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  pagos              pagos?              @relation(fields: [pago_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([alumno_id])
+  @@index([cuenta_id])
 }
 
 model coordinadores {
@@ -309,15 +349,15 @@ model roles {
 }
 
 model sedes {
-  id                Int             @id @default(autoincrement())
+  id                Int                       @id @default(autoincrement())
   direccion_id      Int
-  nombre            String          @db.VarChar(100)
-  telefono_contacto String?         @db.VarChar(20)
-  tipo_instalacion  String?         @db.VarChar(50)
-  activo            Boolean?        @default(true)
+  nombre            String                    @db.VarChar(100)
+  telefono_contacto String?                   @db.VarChar(20)
+  tipo_instalacion  String?                   @db.VarChar(50)
+  activo            Boolean?                  @default(true)
   administrador     administrador[]
   canchas           canchas[]
-  direcciones       direcciones     @relation(fields: [direccion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  direcciones       direcciones               @relation(fields: [direccion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   movimientos       movimientos_financieros[] // <--- NUEVA RELACIÓN
 }
 
@@ -490,17 +530,17 @@ model anuncios_beneficios {
 
 // BL-006: bitácora de ajustes de fecha de inicio de un paquete ya pagado.
 model auditoria_ajuste_fecha {
-  id                Int                @id @default(autoincrement())
-  cuenta_id         Int
-  fecha_anterior    DateTime           @db.Date
-  fecha_nueva       DateTime           @db.Date
-  clases_eliminadas Int
-  clases_generadas  Int
-  motivo            String?            @db.Text
-  realizado_por     Int
-  realizado_en      DateTime           @default(now()) @db.Timestamptz(6)
+  id                 Int                @id @default(autoincrement())
+  cuenta_id          Int
+  fecha_anterior     DateTime           @db.Date
+  fecha_nueva        DateTime           @db.Date
+  clases_eliminadas  Int
+  clases_generadas   Int
+  motivo             String?            @db.Text
+  realizado_por      Int
+  realizado_en       DateTime           @default(now()) @db.Timestamptz(6)
   cuentas_por_cobrar cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  usuarios          usuarios           @relation(fields: [realizado_por], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  usuarios           usuarios           @relation(fields: [realizado_por], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([cuenta_id])
 }

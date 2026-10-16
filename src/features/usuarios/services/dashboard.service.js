@@ -1,4 +1,5 @@
 import { prisma } from '../../../config/database.config.js';
+import { merchService } from '../../merch/merch.service.js';
 
 export const dashboardService = {
   async getDashboardStats() {
@@ -119,10 +120,15 @@ export const dashboardService = {
         return { ...act, date: dateString };
       });
 
+      // 🛍️ MERCH: ya está dentro de ingresosTotales (suma todos los pagos aprobados);
+      // esta llave nueva lo aísla para poder medirlo por separado.
+      const ingresosMerch = await merchService.sumarIngresosMerch(prisma);
+
       return {
         ...roleStats,
         sedes: sedesCount,
         ingresosTotales: Number(ingresosSum._sum.monto_pagado || 0).toFixed(2),
+        ingresosMerch: ingresosMerch.toFixed(2),
         deudaPendiente: Number(deudaSum._sum.monto_final || 0).toFixed(2),
         actividadReciente,
         alumnosFisicosActivos: alumnosUnicosActivos.size,
