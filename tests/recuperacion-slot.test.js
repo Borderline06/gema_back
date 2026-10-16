@@ -10,7 +10,6 @@ import {
 } from '../src/shared/utils/recuperacion-slot.util.js';
 import { siguienteOcurrenciaSemanal } from '../src/shared/utils/clase-fecha.util.js';
 import { formatHoraUTC } from '../src/shared/utils/date.util.js';
-import { reubicarFechasConChoque } from '../src/features/asistencia/asistencia.service.js';
 
 const dbDate = (iso) => new Date(`${iso}T00:00:00.000Z`);
 // Una columna @db.Time(6) llega como Date del 01/01/1970 con la hora en UTC.
@@ -60,13 +59,8 @@ test('claveSlot devuelve null con fecha inválida', () => {
   assert.equal(claveSlot(new Date('no-es-fecha'), dbTime('18:30')), null);
 });
 
-test('ESTADOS_RECUPERACION_OCUPAN_SLOT incluye COMPLETADA_PRESENTE', () => {
-  // Es el estado que dejó una fila física [RECUPERACION] peleando por el
-  // @@unique([inscripcion_id, fecha]): si se omitiera, skipDuplicates volvería
-  // a comerse la clase regular en silencio.
-  assert.ok(ESTADOS_RECUPERACION_OCUPAN_SLOT.includes('COMPLETADA_PRESENTE'));
-  assert.ok(!ESTADOS_RECUPERACION_OCUPAN_SLOT.includes('PENDIENTE'));
-  assert.ok(!ESTADOS_RECUPERACION_OCUPAN_SLOT.includes('VENCIDA'));
+test('ESTADOS_RECUPERACION_OCUPAN_SLOT es ESTRICTAMENTE [PROGRAMADA] (BL-010)', () => {
+  assert.deepEqual([...ESTADOS_RECUPERACION_OCUPAN_SLOT], ['PROGRAMADA']);
 });
 
 // ------------------------------------------------- buscarChoqueRecuperacion
@@ -125,93 +119,20 @@ test('cargarSlotsRecuperacion ignora las recuperaciones sin horario destino', as
   assert.equal(indice.porSlot.get('2026-03-10T18:30').id, 1);
 });
 
-// ------------------------------------------------- reubicarFechasConChoque
+test('cargarSlotsRecuperacion consulta SOLO recuperaciones PROGRAMADA con fecha agendada', async () => {
+  let whereUsado = null;
+  const cliente = {
+    recuperaciones: {
+      findMany: async ({ where }) => {
+        whereUsado = where;
+        return [];
+      },
+    },
+  };
 
-const CICLO_MARTES = ['2026-03-03', '2026-03-10', '2026-03-17', '2026-03-24'].map(mediodiaLocal);
-const claves = (fechas) => fechas.map((f) => f.toISOString().slice(0, 10));
+  await cargarSlotsRecuperacion(cliente, 42);
 
-test('reubicarFechasConChoque: sin índice o sin hora devuelve el plan intacto', () => {
-  const sinIndice = reubicarFechasConChoque({
-    fechas: CICLO_MARTES,
-    horaInicio: dbTime('18:30'),
-    indiceRecuperaciones: null,
-  });
-  assert.deepEqual(claves(sinIndice.fechas), claves(CICLO_MARTES));
-  assert.equal(sinIndice.choques.length, 0);
-
-  const sinHora = reubicarFechasConChoque({
-    fechas: CICLO_MARTES,
-    horaInicio: null,
-    indiceRecuperaciones: indiceCon([['2026-03-10T18:30', 1]]),
-  });
-  assert.deepEqual(claves(sinHora.fechas), claves(CICLO_MARTES));
-});
-
-test('reubicarFechasConChoque: la clase que choca se va al FINAL, sin mover las demás', () => {
-  // Recuperación el martes 10/03 a las 18:30 = el slot del alumno está tomado.
-  const r = reubicarFechasConChoque({
-    fechas: CICLO_MARTES,
-    horaInicio: dbTime('18:30'),
-    indiceRecuperaciones: indiceCon([['2026-03-10T18:30', 55]]),
-  });
-
-  // Las otras tres fechas NO se mueven y la del 10 aterriza una semana después
-  // de la última (31/03): misma semántica que la reposición al final del ciclo.
-  assert.deepEqual(claves(r.fechas), ['2026-03-03', '2026-03-17', '2026-03-24', '2026-03-31']);
-  assert.equal(r.fechas.length, CICLO_MARTES.length, 'el alumno no pierde ninguna sesión');
-  assert.equal(r.omitidas.length, 0);
-
-  assert.equal(r.choques.length, 1);
-  assert.deepEqual(r.choques[0], {
-    fecha: '2026-03-10',
-    hora: '18:30',
-    recuperacion_id: 55,
-    estado_recuperacion: 'PROGRAMADA',
-    fecha_reubicada: '2026-03-31',
-  });
-});
-
-test('reubicarFechasConChoque: una recuperación a otra hora no estorba', () => {
-  const r = reubicarFechasConChoque({
-    fechas: CICLO_MARTES,
-    horaInicio: dbTime('18:30'),
-    indiceRecuperaciones: indiceCon([['2026-03-10T20:00', 55]]),
-  });
-
-  assert.deepEqual(claves(r.fechas), claves(CICLO_MARTES));
-  assert.equal(r.choques.length, 0);
-});
-
-test('reubicarFechasConChoque: dos choques se reubican en cadena sin pisarse', () => {
-  const r = reubicarFechasConChoque({
-    fechas: CICLO_MARTES,
-    horaInicio: dbTime('18:30'),
-    indiceRecuperaciones: indiceCon([
-      ['2026-03-03T18:30', 1],
-      ['2026-03-17T18:30', 2],
-    ]),
-  });
-
-  assert.deepEqual(claves(r.fechas), ['2026-03-10', '2026-03-24', '2026-03-31', '2026-04-07']);
-  assert.equal(new Set(claves(r.fechas)).size, 4, 'ninguna fecha repetida');
-  assert.equal(r.choques.length, 2);
-  assert.equal(r.omitidas.length, 0);
-});
-
-test('reubicarFechasConChoque: sin hueco en 6 semanas omite la fecha y NUNCA lanza', () => {
-  // Todas las ocurrencias semanales posibles están ocupadas.
-  const todasOcupadas = [
-    '2026-03-03', '2026-03-10', '2026-03-17', '2026-03-24',
-    '2026-03-31', '2026-04-07', '2026-04-14',
-  ].map((d) => [`${d}T18:30`, 1]);
-
-  const r = reubicarFechasConChoque({
-    fechas: [mediodiaLocal('2026-03-03')],
-    horaInicio: dbTime('18:30'),
-    indiceRecuperaciones: indiceCon(todasOcupadas),
-  });
-
-  assert.deepEqual(r.fechas, [], 'se omite en vez de lanzar: la $transaction del pago sobrevive');
-  assert.equal(r.omitidas.length, 1);
-  assert.equal(r.omitidas[0].motivo, 'SIN_HUECO_LIBRE');
+  assert.equal(whereUsado.alumno_id, 42);
+  assert.deepEqual(whereUsado.estado, { in: ['PROGRAMADA'] });
+  assert.deepEqual(whereUsado.fecha_programada, { not: null });
 });
