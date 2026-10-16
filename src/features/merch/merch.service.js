@@ -9,19 +9,28 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 const TZ_LIMA = 'America/Lima';
 import {
+  ESTADOS_PAGADOS,
   ESTADO_ITEM,
   ESTADO_MERCH,
   TIPO_TRANSACCION,
   agruparColeccion,
+  TITULO_AVISO_LISTO,
   agruparMerchIds,
+  armarAvisoListo,
   construirLineas,
   detalleMerch,
   filasAlumnoMerch,
+  filtroBusquedaAlumno,
+  normalizarEstadoItem,
+  validarTransicionItem,
 } from './logic/merch.logic.js';
 
-// Estados de un ítem que cuentan como ingreso de merch (RESERVADO aún no se
-// cobró y DEVUELTO se reembolsó).
-const ESTADOS_CON_INGRESO = [ESTADO_ITEM.POSEE, ESTADO_ITEM.PERDIDO];
+// Estados de un ítem que cuentan como ingreso de merch: ya se cobró (RESERVADO no)
+// y no se reembolsó (DEVUELTO no). El ingreso se reconoce al pagar, no al entregar.
+const ESTADOS_CON_INGRESO = ESTADOS_PAGADOS;
+
+// Mientras el aviso de "listo" siga sin leer, las unidades nuevas se suman a ese mismo aviso.
+const VENTANA_AVISO_LISTO_MIN = 30;
 
 // Estados en los que una cuenta todavía le debe plata (o una validación) a la academia.
 const ESTADOS_CUENTA_ABIERTA = ['PENDIENTE', 'PARCIAL', 'POR_VALIDAR'];
@@ -33,6 +42,29 @@ export const whereCuentaSoloMerch = {
 };
 
 const enTransaccion = (tx, fn) => (tx ? fn(tx) : prisma.$transaction(fn));
+
+/**
+ * La mercancía se entrega físicamente en una sede: tiene que existir y estar activa.
+ * `sedeId` ausente es válido solo si `obligatoria` es false (venta de taquilla).
+ */
+const validarSedeRecojo = async (db, sedeId, { obligatoria }) => {
+  if (sedeId === undefined || sedeId === null || sedeId === '') {
+    if (obligatoria) {
+      throw new ApiError('⛔ Debes indicar la sede de recojo (sede_recojo_id).', 400);
+    }
+    return null;
+  }
+  const id = Number(sedeId);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new ApiError('⛔ sede_recojo_id inválido.', 400);
+  }
+  const sede = await db.sedes.findUnique({ where: { id } });
+  if (!sede) throw new ApiError('⛔ La sede de recojo indicada no existe.', 404);
+  if (sede.activo === false) {
+    throw new ApiError(`⛔ La sede "${sede.nombre}" no está activa para recojo.`, 409);
+  }
+  return id;
+};
 
 /**
  * Valida los ítems pedidos contra el catálogo y descuenta el stock de forma
@@ -91,7 +123,10 @@ export const merchService = {
   obtenerColeccion: async (alumnoId) => {
     const items = await prisma.alumno_merch.findMany({
       where: { alumno_id: Number(alumnoId) },
-      include: { merch: { select: { id: true, nombre: true, imagen_url: true } } },
+      include: {
+        merch: { select: { id: true, nombre: true, imagen_url: true } },
+        sedes: { select: { id: true, nombre: true } }, // dónde recoge
+      },
       orderBy: { fecha_adquisicion: 'desc' },
     });
 
@@ -104,6 +139,9 @@ export const merchService = {
         perdido: grupos.perdido.length,
         devuelto: grupos.devuelto.length,
         reservado: grupos.reservado.length,
+        por_entregar: grupos.por_entregar.length,
+        listo_para_recojo: grupos.listo_para_recojo.length,
+        entregado: grupos.entregado.length,
       },
     };
   },
@@ -115,12 +153,14 @@ export const merchService = {
    * express), así el ingreso suma al dashboard y a la caja.
    */
   comprarIndependiente: async (data, adminId, tx = null) => {
-    const { alumno_id, merch_ids, metodo_pago_id, codigo_operacion, notas } = data;
+    const { alumno_id, merch_ids, metodo_pago_id, codigo_operacion, notas, sede_recojo_id } = data;
 
     return enTransaccion(tx, async (db) => {
       const alumno = await db.alumnos.findUnique({ where: { usuario_id: Number(alumno_id) } });
       if (!alumno) throw new ApiError('El alumno no existe.', 404);
 
+      // En taquilla la sede es opcional (se puede entregar en el acto).
+      const sedeId = await validarSedeRecojo(db, sede_recojo_id, { obligatoria: false });
       const { lineas, total } = await validarYDescontarStock(db, merch_ids);
 
       const cuenta = await db.cuentas_por_cobrar.create({
@@ -151,7 +191,9 @@ export const merchService = {
           alumno_id: Number(alumno_id),
           cuenta_id: cuenta.id,
           pago_id: pago.id,
-          estado_item: ESTADO_ITEM.POSEE,
+          sede_recojo_id: sedeId,
+          // Pagado pero aún no en la mano del alumno: la logística lo mueve desde acá.
+          estado_item: ESTADO_ITEM.POR_ENTREGAR,
         }),
       });
 
@@ -180,7 +222,7 @@ export const merchService = {
    * Reserva stock y crea los ítems RESERVADO de una cuenta de matrícula.
    * Sin merch_ids devuelve total 0 y no toca nada (la matrícula queda igual).
    */
-  reservarParaCuenta: async (tx, { alumno_id, cuenta_id, merch_ids }) => {
+  reservarParaCuenta: async (tx, { alumno_id, cuenta_id, merch_ids, sede_recojo_id, prefijo }) => {
     const sinMerch =
       merch_ids === undefined ||
       merch_ids === null ||
@@ -189,17 +231,20 @@ export const merchService = {
       return { total: 0, lineas: [], detalle: null };
     }
 
+    // Con merch en el pedido la sede es obligatoria: sin ella nadie sabe adónde enviarlo.
+    const sedeId = await validarSedeRecojo(tx, sede_recojo_id, { obligatoria: true });
     const { lineas, total } = await validarYDescontarStock(tx, merch_ids);
 
     await tx.alumno_merch.createMany({
       data: filasAlumnoMerch(lineas, {
         alumno_id: Number(alumno_id),
         cuenta_id: Number(cuenta_id),
+        sede_recojo_id: sedeId,
         estado_item: ESTADO_ITEM.RESERVADO,
       }),
     });
 
-    return { total, lineas, detalle: detalleMerch(lineas) };
+    return { total, lineas, detalle: detalleMerch(lineas, prefijo), sede_recojo_id: sedeId };
   },
 
   /**
@@ -211,9 +256,14 @@ export const merchService = {
    */
   cerrarCuentaConMerch: async (
     tx,
-    { alumno_id, cuenta_id, detalle_base, monto_matricula, hubo_beneficios, merch_ids }
+    { alumno_id, cuenta_id, detalle_base, monto_matricula, hubo_beneficios, merch_ids, sede_recojo_id }
   ) => {
-    const reserva = await merchService.reservarParaCuenta(tx, { alumno_id, cuenta_id, merch_ids });
+    const reserva = await merchService.reservarParaCuenta(tx, {
+      alumno_id,
+      cuenta_id,
+      merch_ids,
+      sede_recojo_id,
+    });
     const montoFinal = redondear2(monto_matricula + reserva.total);
 
     await tx.cuentas_por_cobrar.update({
@@ -232,12 +282,15 @@ export const merchService = {
     return { montoFinal, merch: reserva };
   },
 
-  /** Pago aprobado: los ítems reservados de la cuenta pasan a POSEE. */
+  /**
+   * Pago completo aprobado: los ítems reservados pasan a POR_ENTREGAR. Ya están
+   * pagados, pero siguen en la academia: la logística debe llevarlos a la sede.
+   */
   confirmarMerchDeCuenta: async (tx, cuentaId, pagoId) => {
     const { count } = await tx.alumno_merch.updateMany({
       where: { cuenta_id: Number(cuentaId), estado_item: ESTADO_ITEM.RESERVADO },
       data: {
-        estado_item: ESTADO_ITEM.POSEE,
+        estado_item: ESTADO_ITEM.POR_ENTREGAR,
         fecha_adquisicion: new Date(),
         pago_id: Number(pagoId),
       },
@@ -247,7 +300,7 @@ export const merchService = {
 
   /**
    * Decisión única de merch al validar un pago (la llama validarPago):
-   *  - APROBADO y deuda en 0  -> RESERVADO pasa a POSEE.
+   *  - APROBADO y deuda en 0  -> RESERVADO pasa a POR_ENTREGAR.
    *  - APROBADO con saldo     -> no pasa nada: sigue RESERVADO hasta completar el pago.
    *  - RECHAZADO sin abonos aprobados previos (cuenta queda RECHAZADO) -> se libera la
    *    reserva. Si ya había un abono aprobado (cuenta PARCIAL) se conserva: hay plata
@@ -338,12 +391,12 @@ export const merchService = {
     return links > 0 ? TIPO_TRANSACCION.MIXTO : TIPO_TRANSACCION.MERCH;
   },
 
-  /** Monto de merch (reservado o poseído) que lleva una cuenta, en céntimos exactos. */
+  /** Monto de merch vigente (reservado o ya pagado, no devuelto) que lleva una cuenta, en céntimos exactos. */
   sumarMerchDeCuenta: async (tx, cuentaId) => {
     const items = await tx.alumno_merch.findMany({
       where: {
         cuenta_id: Number(cuentaId),
-        estado_item: { in: [ESTADO_ITEM.RESERVADO, ESTADO_ITEM.POSEE] },
+        estado_item: { in: [ESTADO_ITEM.RESERVADO, ...ESTADOS_PAGADOS] },
       },
       select: { monto_pagado: true },
     });
@@ -363,9 +416,10 @@ export const merchService = {
    * Orden de merch creada por el propio alumno. Reserva el stock y deja una
    * cuenta PENDIENTE (48 h, igual que la matrícula) con los ítems RESERVADO.
    * El alumno paga con el flujo estándar (POST /api/pagos/reportar con
-   * deuda_id = cuenta_id) y el admin la valida: ahí pasan a POSEE.
+   * deuda_id = cuenta_id) y el admin la valida: con el pago completo pasan a
+   * POR_ENTREGAR y la academia los lleva a `sede_recojo_id`.
    */
-  crearOrden: async ({ alumno_id, merch_ids }, tx = null) => {
+  crearOrden: async ({ alumno_id, merch_ids, sede_recojo_id }, tx = null) => {
     return enTransaccion(tx, async (db) => {
       const alumno = await db.alumnos.findUnique({ where: { usuario_id: Number(alumno_id) } });
       if (!alumno) throw new ApiError('El alumno no existe.', 404);
@@ -385,6 +439,7 @@ export const merchService = {
         );
       }
 
+      const sedeId = await validarSedeRecojo(db, sede_recojo_id, { obligatoria: true });
       const { lineas, total } = await validarYDescontarStock(db, merch_ids);
 
       const vence = dayjs().tz(TZ_LIMA).add(2, 'day').endOf('day');
@@ -403,6 +458,7 @@ export const merchService = {
         data: filasAlumnoMerch(lineas, {
           alumno_id: Number(alumno_id),
           cuenta_id: cuenta.id,
+          sede_recojo_id: sedeId,
           estado_item: ESTADO_ITEM.RESERVADO,
         }),
       });
@@ -422,6 +478,7 @@ export const merchService = {
         cuenta_id: cuenta.id,
         total_a_pagar: total,
         fecha_vencimiento: vence.toDate(),
+        sede_recojo_id: sedeId,
         items: lineas,
       };
     });
@@ -454,32 +511,184 @@ export const merchService = {
     return liberadas;
   },
 
-  // ------------------------------------------------------------ Estado de ítem
-  cambiarEstadoItem: async (itemId, nuevoEstado, tx = null) => {
+  // ------------------------------------------------- Estado de ítem y logística
+  /**
+   * Único punto por donde se mueve un ítem a mano (logística y correcciones).
+   * Valida la transición, deja la huella de quién y cuándo, repone stock en
+   * DEVUELTO y, si pasa a LISTO_PARA_RECOJO, avisa al alumno (un solo aviso agrupado).
+   * Repetir el mismo estado es un no-op. `notificar: false` lo usan los lotes, que
+   * avisan una sola vez al final.
+   */
+  moverItem: async (itemId, estadoSolicitado, adminId = null, tx = null, { notificar = true } = {}) => {
+    const nuevoEstado = normalizarEstadoItem(estadoSolicitado); // POSEE (legacy) = ENTREGADO
+
     return enTransaccion(tx, async (db) => {
       const item = await db.alumno_merch.findUnique({ where: { id: Number(itemId) } });
       if (!item) throw new ApiError('El ítem de merch no existe.', 404);
 
-      if (item.estado_item === ESTADO_ITEM.RESERVADO) {
-        throw new ApiError('El ítem está reservado: aún no se aprobó el pago.', 409);
-      }
-      if (item.estado_item === ESTADO_ITEM.DEVUELTO) {
-        throw new ApiError('El ítem ya fue devuelto.', 409);
-      }
-      if (item.estado_item === nuevoEstado) return item;
+      const actual = normalizarEstadoItem(item.estado_item);
+      if (actual === nuevoEstado) return { ...item, sin_cambios: true };
+      validarTransicionItem(actual, nuevoEstado);
 
-      const actualizado = await db.alumno_merch.update({
-        where: { id: item.id },
-        data: { estado_item: nuevoEstado },
-      });
+      const ahora = new Date();
+      const data = { estado_item: nuevoEstado };
+      if (adminId) data.gestionado_por = Number(adminId);
+      if (nuevoEstado === ESTADO_ITEM.LISTO_PARA_RECOJO) data.fecha_listo = ahora;
+      if (nuevoEstado === ESTADO_ITEM.ENTREGADO && actual !== ESTADO_ITEM.PERDIDO) {
+        data.fecha_entrega = ahora;
+      }
+      // Revertir: vuelve a esperar en el local, como si la entrega no hubiera ocurrido.
+      if (nuevoEstado === ESTADO_ITEM.POR_ENTREGAR) {
+        data.fecha_entrega = null;
+        data.fecha_listo = null;
+      }
+
+      const actualizado = await db.alumno_merch.update({ where: { id: item.id }, data });
 
       if (nuevoEstado === ESTADO_ITEM.DEVUELTO) {
         await db.merch.update({
           where: { id: item.merch_id },
-          data: { stock: { increment: 1 }, actualizado_en: new Date() },
+          data: { stock: { increment: 1 }, actualizado_en: ahora },
         });
       }
+
+      if (nuevoEstado === ESTADO_ITEM.LISTO_PARA_RECOJO && notificar) {
+        await merchService.avisarPedidosListos(db, item.alumno_id);
+      }
+
       return actualizado;
+    });
+  },
+
+  /**
+   * UN solo aviso con todo lo que el alumno tiene listo en las sedes. Si ya hay un aviso
+   * de "listo" sin leer de los últimos 30 minutos (el admin va marcando unidad por
+   * unidad), se actualiza ese mismo aviso con la lista completa en vez de crear otro.
+   */
+  avisarPedidosListos: async (db, alumnoId) => {
+    const listos = await db.alumno_merch.findMany({
+      where: { alumno_id: Number(alumnoId), estado_item: ESTADO_ITEM.LISTO_PARA_RECOJO },
+      include: { merch: { select: { nombre: true } }, sedes: { select: { nombre: true } } },
+      orderBy: { id: 'asc' },
+    });
+    const mensaje = armarAvisoListo(listos);
+    if (!mensaje) return null;
+
+    const desde = new Date(Date.now() - VENTANA_AVISO_LISTO_MIN * 60 * 1000);
+    const previo = await db.notificaciones.findFirst({
+      where: {
+        alumno_id: Number(alumnoId),
+        titulo: TITULO_AVISO_LISTO,
+        leido: false,
+        creado_en: { gte: desde },
+      },
+      orderBy: { creado_en: 'desc' },
+    });
+
+    if (previo) {
+      return db.notificaciones.update({
+        where: { id: previo.id },
+        data: { mensaje, creado_en: new Date() },
+      });
+    }
+    return db.notificaciones.create({
+      data: {
+        alumno_id: Number(alumnoId),
+        titulo: TITULO_AVISO_LISTO,
+        mensaje,
+        tipo: 'SUCCESS',
+        categoria: 'VENTAS',
+      },
+    });
+  },
+
+  // Compatibilidad con PATCH /items/:id/estado (PERDIDO / DEVUELTO / corrección).
+  cambiarEstadoItem: async (itemId, nuevoEstado, adminId = null, tx = null) =>
+    merchService.moverItem(itemId, nuevoEstado, adminId, tx),
+
+  /**
+   * Pedido en la sede: avisa al alumno UNA vez, aunque se marquen varias unidades.
+   *  - `item_ids`: más unidades para marcar en la misma operación.
+   *  - `incluir_orden`: marca también las demás unidades POR_ENTREGAR de la misma orden y sede.
+   * Devuelve el ítem principal y cuántas unidades cambiaron de verdad.
+   */
+  marcarListoParaRecojo: async (itemId, adminId, { item_ids = [], incluir_orden = false } = {}, tx = null) => {
+    return enTransaccion(tx, async (db) => {
+      const principal = await db.alumno_merch.findUnique({ where: { id: Number(itemId) } });
+      if (!principal) throw new ApiError('El ítem de merch no existe.', 404);
+
+      const ids = new Set([Number(itemId), ...item_ids.map(Number)]);
+      if (incluir_orden && principal.cuenta_id) {
+        const hermanos = await db.alumno_merch.findMany({
+          where: {
+            cuenta_id: principal.cuenta_id,
+            estado_item: ESTADO_ITEM.POR_ENTREGAR,
+            sede_recojo_id: principal.sede_recojo_id,
+          },
+          select: { id: true },
+        });
+        hermanos.forEach((h) => ids.add(h.id));
+      }
+
+      let actualizadas = 0;
+      const alumnos = new Set();
+      let resultado = null;
+      for (const id of ids) {
+        const r = await merchService.moverItem(id, ESTADO_ITEM.LISTO_PARA_RECOJO, adminId, db, {
+          notificar: false,
+        });
+        if (id === Number(itemId)) resultado = r;
+        if (!r.sin_cambios) {
+          actualizadas += 1;
+          alumnos.add(r.alumno_id);
+        }
+      }
+      for (const alumnoId of alumnos) {
+        await merchService.avisarPedidosListos(db, alumnoId);
+      }
+
+      return { ...resultado, items_actualizados: actualizadas };
+    });
+  },
+
+  /** El recepcionista se lo dio en mano al alumno (desde POR_ENTREGAR o LISTO_PARA_RECOJO). */
+  marcarEntregado: async (itemId, adminId, tx = null) =>
+    merchService.moverItem(itemId, ESTADO_ITEM.ENTREGADO, adminId, tx),
+
+  /** Error del recepcionista: el ítem ENTREGADO vuelve a POR_ENTREGAR. */
+  revertirEntrega: async (itemId, adminId, tx = null) =>
+    merchService.moverItem(itemId, ESTADO_ITEM.POR_ENTREGAR, adminId, tx),
+
+  /**
+   * Bandeja de recepción: qué hay que entregar y dónde. Por defecto lo pendiente
+   * (POR_ENTREGAR y LISTO_PARA_RECOJO). Filtros: `sede_id` y `busqueda` (nombre,
+   * apellido o DNI del alumno). No trae imagen_url (es Base64 y haría pesadísima la lista).
+   */
+  listarLogistica: async ({ estados, sede_id, busqueda } = {}) => {
+    const filtroEstados = estados?.length
+      ? estados
+      : [ESTADO_ITEM.POR_ENTREGAR, ESTADO_ITEM.LISTO_PARA_RECOJO];
+    const filtroAlumno = filtroBusquedaAlumno(busqueda);
+
+    return prisma.alumno_merch.findMany({
+      where: {
+        estado_item: { in: filtroEstados },
+        ...(sede_id && { sede_recojo_id: Number(sede_id) }),
+        ...(filtroAlumno && { alumnos: filtroAlumno }),
+      },
+      include: {
+        merch: { select: { id: true, nombre: true } },
+        sedes: { select: { id: true, nombre: true } },
+        alumnos: {
+          select: {
+            usuarios: {
+              select: { nombres: true, apellidos: true, numero_documento: true, telefono_personal: true },
+            },
+          },
+        },
+        cuentas_por_cobrar: { select: { id: true, detalle_adicional: true } },
+      },
+      orderBy: [{ sede_recojo_id: 'asc' }, { fecha_adquisicion: 'asc' }],
     });
   },
 

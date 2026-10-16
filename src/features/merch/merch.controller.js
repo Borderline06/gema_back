@@ -56,8 +56,46 @@ export const merchController = {
   }),
 
   cambiarEstadoItem: catchAsync(async (req, res) => {
-    const data = await merchService.cambiarEstadoItem(req.params.id, req.body.estado_item);
+    const data = await merchService.cambiarEstadoItem(
+      req.params.id,
+      req.body.estado_item,
+      req.user.id
+    );
     return apiResponse.success(res, { data, message: 'Estado del ítem actualizado' });
+  }),
+
+  // --- Logística física ---------------------------------------------------
+  listarLogistica: catchAsync(async (req, res) => {
+    const data = await merchService.listarLogistica({
+      estados: req.query.estado,
+      sede_id: req.query.sede_id,
+      busqueda: req.query.busqueda,
+    });
+    return apiResponse.success(res, { data, message: 'Bandeja de logística de merch' });
+  }),
+
+  marcarListo: catchAsync(async (req, res) => {
+    const data = await merchService.marcarListoParaRecojo(req.params.id, req.user.id, req.body);
+    const message =
+      data.items_actualizados === 0
+        ? 'El pedido ya estaba marcado como listo para recojo'
+        : 'Pedido listo para recojo. Se avisó al alumno.';
+    return apiResponse.success(res, { data, message });
+  }),
+
+  // Error del recepcionista: el ítem ENTREGADO vuelve a POR_ENTREGAR.
+  revertirEntrega: catchAsync(async (req, res) => {
+    const data = await merchService.revertirEntrega(req.params.id, req.user.id);
+    const message = data.sin_cambios
+      ? 'El ítem ya estaba pendiente de entrega'
+      : 'Entrega revertida: el ítem vuelve a POR_ENTREGAR';
+    return apiResponse.success(res, { data, message });
+  }),
+
+  marcarEntregado: catchAsync(async (req, res) => {
+    const data = await merchService.marcarEntregado(req.params.id, req.user.id);
+    const message = data.sin_cambios ? 'El pedido ya estaba entregado' : 'Pedido entregado al alumno';
+    return apiResponse.success(res, { data, message });
   }),
 
   metricas: catchAsync(async (req, res) => {

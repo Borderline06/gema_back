@@ -59,7 +59,8 @@ export const inscripcionService = {
   inscribirPaquete: async (data) => {
     // `incluye_camiseta` es el flag legacy (+S/ 50 fijos): se sigue aceptando.
     // `merch_ids` (opcional) es el reemplazo: productos del catálogo de Merch.
-    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta, forzar_concepto_vigente, merch_ids } = data;
+    // `sede_recojo_id` (obligatorio solo si hay merch_ids): sede donde recogerá el pedido.
+    const { alumno_id, horario_ids, fecha_inicio_electiva, incluye_camiseta, forzar_concepto_vigente, merch_ids, sede_recojo_id } = data;
 
     try {
       // 1. Validación de estructura de entrada (Utils sigue sirviendo)
@@ -215,6 +216,7 @@ export const inscripcionService = {
           monto_matricula: montoActualizado,
           hubo_beneficios: beneficiosEnCola.length > 0,
           merch_ids,
+          sede_recojo_id,
         });
         montoActualizado = montoFinal;
 

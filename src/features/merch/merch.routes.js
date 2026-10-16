@@ -66,7 +66,42 @@ router.put(
   merchController.actualizar
 );
 
-// POSEE / PERDIDO / DEVUELTO de una unidad de la colección.
+// --- Logística física: preparar, enviar a la sede, avisar y entregar en mano ---
+// La operan Administrador y Coordinador (suelen estar en recepción).
+const recepcion = authorize('Administrador', 'Coordinador');
+
+// Bandeja: qué hay que entregar y dónde (?estado=&sede_id=&busqueda=nombre o DNI).
+router.get(
+  '/logistica',
+  recepcion,
+  validateQuery(merchSchema.logisticaQuerySchema),
+  merchController.listarLogistica
+);
+// POR_ENTREGAR -> LISTO_PARA_RECOJO. Avisa al alumno UNA sola vez, aunque se marquen
+// varias unidades (body opcional: { item_ids: [..], incluir_orden: true }).
+router.patch(
+  '/logistica/:id/listo',
+  recepcion,
+  validateParams(merchSchema.idParamSchema),
+  validate(merchSchema.listoBodySchema),
+  merchController.marcarListo
+);
+// POR_ENTREGAR / LISTO_PARA_RECOJO -> ENTREGADO (el recepcionista se lo dio en mano).
+router.patch(
+  '/logistica/:id/entregar',
+  recepcion,
+  validateParams(merchSchema.idParamSchema),
+  merchController.marcarEntregado
+);
+// ENTREGADO -> POR_ENTREGAR (el recepcionista se equivocó).
+router.patch(
+  '/logistica/:id/revertir',
+  recepcion,
+  validateParams(merchSchema.idParamSchema),
+  merchController.revertirEntrega
+);
+
+// ENTREGADO / PERDIDO / DEVUELTO de una unidad de la colección (correcciones).
 router.patch(
   '/items/:id/estado',
   authorize('Administrador'),

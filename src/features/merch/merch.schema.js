@@ -56,6 +56,8 @@ export const merchSchema = {
     metodo_pago_id: idPositivo('metodo_pago_id'),
     codigo_operacion: z.string().trim().max(50).optional(),
     notas: z.string().trim().max(200).optional(),
+    // Opcional en taquilla (se puede entregar en el acto); si viene, se valida la sede.
+    sede_recojo_id: idPositivo('sede_recojo_id').optional(),
   }),
 
   ordenSchema: z.object({
@@ -64,13 +66,43 @@ export const merchSchema = {
       .array(idPositivo('merch_ids'), { required_error: 'merch_ids es requerido' })
       .min(1, 'Debes indicar al menos un producto')
       .max(50, 'Demasiadas unidades en una sola orden'),
+    // Dónde recogerá el pedido: la academia lo prepara y lo envía a esa sede.
+    sede_recojo_id: idPositivo('sede_recojo_id'),
   }),
 
+  // Correcciones manuales. Listo/entregado tienen sus propios endpoints de logística;
+  // POSEE es el nombre viejo de ENTREGADO y se sigue aceptando.
   estadoItemSchema: z.object({
-    estado_item: z.enum(['POSEE', 'PERDIDO', 'DEVUELTO'], {
-      errorMap: () => ({ message: 'estado_item debe ser POSEE, PERDIDO o DEVUELTO' }),
+    estado_item: z.enum(['ENTREGADO', 'POSEE', 'PERDIDO', 'DEVUELTO'], {
+      errorMap: () => ({ message: 'estado_item debe ser ENTREGADO, PERDIDO o DEVUELTO' }),
     }),
   }),
+
+  logisticaQuerySchema: z.object({
+    // "POR_ENTREGAR,LISTO_PARA_RECOJO" (por defecto lo pendiente de entregar)
+    estado: z
+      .string()
+      .transform((v) => v.split(',').map((e) => e.trim().toUpperCase()).filter(Boolean))
+      .pipe(
+        z.array(
+          z.enum(['POR_ENTREGAR', 'LISTO_PARA_RECOJO', 'ENTREGADO', 'PERDIDO', 'DEVUELTO'], {
+            errorMap: () => ({ message: 'estado inválido' }),
+          })
+        )
+      )
+      .optional(),
+    sede_id: idPositivo('sede_id').optional(),
+    // Nombre, apellido o DNI del alumno (cada palabra debe coincidir).
+    busqueda: z.string().trim().max(100).optional(),
+  }),
+
+  // Cuerpo opcional de /logistica/:id/listo: marcar varias unidades con UN solo aviso.
+  listoBodySchema: z
+    .object({
+      item_ids: z.array(idPositivo('item_ids')).max(50).optional(),
+      incluir_orden: z.boolean().optional(),
+    })
+    .default({}),
 
   idParamSchema: z.object({
     id: z

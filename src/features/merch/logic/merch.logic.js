@@ -3,12 +3,71 @@ import { aCentimos, aMonto, redondear2 } from '../../../shared/utils/dinero.util
 
 export const ESTADO_MERCH = { ACTIVO: 'ACTIVO', INACTIVO: 'INACTIVO' };
 
+/**
+ * Ciclo de un ítem:
+ *   RESERVADO (sin pagar) -> POR_ENTREGAR (pagado) -> LISTO_PARA_RECOJO (en la sede) -> ENTREGADO
+ * Aparte: PERDIDO y DEVUELTO. POSEE es legacy (equivale a ENTREGADO): se lee, ya no se escribe.
+ */
 export const ESTADO_ITEM = {
   RESERVADO: 'RESERVADO',
+  POR_ENTREGAR: 'POR_ENTREGAR',
+  LISTO_PARA_RECOJO: 'LISTO_PARA_RECOJO',
+  ENTREGADO: 'ENTREGADO',
   POSEE: 'POSEE',
   PERDIDO: 'PERDIDO',
   DEVUELTO: 'DEVUELTO',
 };
+
+/** Estados con el dinero ya cobrado y la mercancía no devuelta: cuentan como ingreso de merch. */
+export const ESTADOS_PAGADOS = [
+  ESTADO_ITEM.POR_ENTREGAR,
+  ESTADO_ITEM.LISTO_PARA_RECOJO,
+  ESTADO_ITEM.ENTREGADO,
+  ESTADO_ITEM.POSEE,
+  ESTADO_ITEM.PERDIDO,
+];
+
+/**
+ * Movimientos permitidos a mano. RESERVADO -> POR_ENTREGAR solo lo hace la validación del pago.
+ * POR_ENTREGAR -> ENTREGADO directo cubre al alumno que ya está en el mostrador; ENTREGADO ->
+ * POR_ENTREGAR es el "revertir" del recepcionista que se equivocó.
+ */
+const TRANSICIONES = {
+  [ESTADO_ITEM.RESERVADO]: [],
+  [ESTADO_ITEM.POR_ENTREGAR]: [
+    ESTADO_ITEM.LISTO_PARA_RECOJO,
+    ESTADO_ITEM.ENTREGADO,
+    ESTADO_ITEM.DEVUELTO,
+  ],
+  [ESTADO_ITEM.LISTO_PARA_RECOJO]: [ESTADO_ITEM.ENTREGADO, ESTADO_ITEM.DEVUELTO],
+  [ESTADO_ITEM.ENTREGADO]: [ESTADO_ITEM.POR_ENTREGAR, ESTADO_ITEM.PERDIDO, ESTADO_ITEM.DEVUELTO],
+  [ESTADO_ITEM.POSEE]: [ESTADO_ITEM.POR_ENTREGAR, ESTADO_ITEM.PERDIDO, ESTADO_ITEM.DEVUELTO],
+  [ESTADO_ITEM.PERDIDO]: [ESTADO_ITEM.ENTREGADO],
+  [ESTADO_ITEM.DEVUELTO]: [],
+};
+
+const MOTIVO_BLOQUEO = {
+  [ESTADO_ITEM.RESERVADO]: 'la orden aún no está pagada',
+  [ESTADO_ITEM.DEVUELTO]: 'el ítem ya fue devuelto',
+};
+
+/** POSEE era el nombre viejo de ENTREGADO. */
+export const normalizarEstadoItem = (estado) =>
+  estado === ESTADO_ITEM.POSEE ? ESTADO_ITEM.ENTREGADO : estado;
+
+/** Lanza 409 si el ítem no puede pasar de `actual` a `nuevo`. */
+export function validarTransicionItem(actual, nuevo) {
+  const permitidos = TRANSICIONES[actual] ?? [];
+  if (permitidos.includes(nuevo)) return;
+
+  const motivo = MOTIVO_BLOQUEO[actual];
+  throw new ApiError(
+    motivo
+      ? `⛔ No se puede pasar de ${actual} a ${nuevo}: ${motivo}.`
+      : `⛔ No se puede pasar de ${actual} a ${nuevo}. Desde ${actual} solo se permite: ${permitidos.join(', ') || 'ninguno'}.`,
+    409
+  );
+}
 
 export const TIPO_TRANSACCION = { MATRICULA: 'MATRICULA', MERCH: 'MERCH', MIXTO: 'MIXTO' };
 
@@ -100,12 +159,86 @@ export function filasAlumnoMerch(lineas, base) {
   );
 }
 
-/** Agrupa la colección por estado para `GET /merch/alumno/:id`. */
+/**
+ * Agrupa la colección por estado para `GET /merch/alumno/:id`.
+ * `posee` se conserva por compatibilidad con el frontend y ahora significa "ya lo
+ * tiene en la mano": los ENTREGADO (y los POSEE legacy) aparecen en `entregado` y en `posee`.
+ */
 export function agruparColeccion(items) {
-  const grupos = { posee: [], perdido: [], devuelto: [], reservado: [] };
+  const grupos = {
+    posee: [],
+    perdido: [],
+    devuelto: [],
+    reservado: [],
+    por_entregar: [],
+    listo_para_recojo: [],
+    entregado: [],
+  };
   for (const item of items) {
-    const clave = String(item.estado_item).toLowerCase();
+    const estado = String(item.estado_item);
+    if (estado === ESTADO_ITEM.ENTREGADO || estado === ESTADO_ITEM.POSEE) {
+      grupos.entregado.push(item);
+      grupos.posee.push(item);
+      continue;
+    }
+    const clave = estado.toLowerCase();
     if (grupos[clave]) grupos[clave].push(item);
   }
   return grupos;
+}
+
+/**
+ * Filtro Prisma para buscar por nombre, apellido o documento del alumno. Cada palabra
+ * debe aparecer en alguno de los tres campos ("juan perez" encuentra a Juan Pérez);
+ * así sirve igual un DNI completo, un pedazo de DNI o un nombre con apellido.
+ */
+export function filtroBusquedaAlumno(busqueda) {
+  const palabras = String(busqueda ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5);
+  if (palabras.length === 0) return undefined;
+
+  return {
+    usuarios: {
+      AND: palabras.map((p) => ({
+        OR: [
+          { nombres: { contains: p, mode: 'insensitive' } },
+          { apellidos: { contains: p, mode: 'insensitive' } },
+          { numero_documento: { contains: p } },
+        ],
+      })),
+    },
+  };
+}
+
+export const TITULO_AVISO_LISTO = '📦 Tu pedido está listo para recoger';
+
+/**
+ * Un solo aviso para todo lo que el alumno tiene esperándolo en las sedes, agrupado por
+ * sede y producto: "Gorra x2 y Camiseta x1 en Miraflores". `items` traen merch.nombre y
+ * sedes.nombre. Devuelve null si no hay nada que avisar.
+ */
+export function armarAvisoListo(items) {
+  if (!items?.length) return null;
+
+  const porSede = new Map();
+  for (const item of items) {
+    const sede = item.sedes?.nombre ?? null;
+    const productos = porSede.get(sede) ?? new Map();
+    const nombre = item.merch?.nombre ?? 'Producto';
+    productos.set(nombre, (productos.get(nombre) || 0) + 1);
+    porSede.set(sede, productos);
+  }
+
+  const partes = [...porSede].map(([sede, productos]) => {
+    const lista = [...productos].map(([nombre, n]) => (n > 1 ? `${nombre} x${n}` : nombre));
+    const texto =
+      lista.length > 1 ? `${lista.slice(0, -1).join(', ')} y ${lista.at(-1)}` : lista[0];
+    return sede ? `${texto} en la sede ${sede}` : `${texto} en recepción`;
+  });
+
+  const total = items.length;
+  return `Ya puedes recoger ${total > 1 ? 'tus pedidos' : 'tu pedido'}: ${partes.join('; ')}.`;
 }

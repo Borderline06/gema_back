@@ -265,14 +265,24 @@ model alumno_merch {
   pago_id            Int?
   fecha_adquisicion  DateTime            @default(now()) @db.Timestamp(6)
   monto_pagado       Decimal             @db.Decimal(10, 2) // precio congelado al comprar
-  estado_item        String              @default("POSEE") @db.VarChar(15) // RESERVADO | POSEE | PERDIDO | DEVUELTO
+  // RESERVADO (sin pagar) -> POR_ENTREGAR (pagado) -> LISTO_PARA_RECOJO (en la sede) -> ENTREGADO
+  // Aparte: PERDIDO | DEVUELTO. POSEE es legacy (equivale a ENTREGADO) y ya no se escribe.
+  estado_item        String              @default("RESERVADO") @db.VarChar(20)
+  // Logística física: el pedido se prepara y se envía a esta sede para que el alumno lo recoja.
+  sede_recojo_id     Int?
+  fecha_listo        DateTime?           @db.Timestamp(6)
+  fecha_entrega      DateTime?           @db.Timestamp(6)
+  gestionado_por     Int? // usuario (admin o coordinador de recepción) que lo marcó listo / entregado / revertido
   alumnos            alumnos             @relation(fields: [alumno_id], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
   merch              merch               @relation(fields: [merch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   cuentas_por_cobrar cuentas_por_cobrar? @relation(fields: [cuenta_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   pagos              pagos?              @relation(fields: [pago_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  sedes              sedes?              @relation(fields: [sede_recojo_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  gestionado         usuarios?           @relation("MerchGestionadoPor", fields: [gestionado_por], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@index([alumno_id])
   @@index([cuenta_id])
+  @@index([estado_item, sede_recojo_id])
 }
 
 model coordinadores {
@@ -359,6 +369,7 @@ model sedes {
   canchas           canchas[]
   direcciones       direcciones               @relation(fields: [direccion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   movimientos       movimientos_financieros[] // <--- NUEVA RELACIÓN
+  alumno_merch      alumno_merch[]
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -406,6 +417,7 @@ model usuarios {
   notificaciones          notificaciones[]
   reprogramaciones_clases reprogramaciones_clases[]
   auditoria_ajuste_fecha  auditoria_ajuste_fecha[]
+  merch_gestionado        alumno_merch[]            @relation("MerchGestionadoPor")
   roles                   roles                     @relation(fields: [rol_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   tipos_documento         tipos_documento?          @relation(fields: [tipo_documento_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
