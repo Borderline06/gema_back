@@ -6,6 +6,9 @@ import {
   claveDiaDesdeFecha,
 } from '../../../shared/utils/feriado.util.js';
 
+const NOMBRES_DIA = { 0: 'Domingo', 1: 'Lunes', 2: 'Martes', 3: 'Miércoles', 4: 'Jueves', 5: 'Viernes', 6: 'Sábado', 7: 'Domingo' };
+const nombreDia = (dia) => NOMBRES_DIA[Number(dia)] ?? `día ${dia}`;
+
 /**
  * Verifica si el alumno tiene deudas que bloqueen el proceso.
  */
@@ -49,7 +52,7 @@ export const validarAforoHorario = async (tx, idHorario, fechaLimiteZombie) => {
   });
 
   if (ocupados >= (horario.capacidad_max || 20)) {
-    throw new Error(`El horario del día ${horario.dia_semana} ya está AGOTADO.`);
+    throw new Error(`El horario del ${nombreDia(horario.dia_semana)} ya está AGOTADO.`);
   }
 
   return horario;
@@ -118,7 +121,7 @@ export const validarAforoFechaClase = async (tx, horario, fechaClase) => {
 
   if (ocupados >= (horario.capacidad_max || 20)) {
     throw new ApiError(
-      `⛔ El horario del día ${horario.dia_semana} ya está AGOTADO para la fecha ${claveDiaDesdeFecha(fechaClase)}.`,
+      `⛔ El horario del ${nombreDia(horario.dia_semana)} ya está AGOTADO para la fecha ${claveDiaDesdeFecha(fechaClase)}.`,
       409
     );
   }
