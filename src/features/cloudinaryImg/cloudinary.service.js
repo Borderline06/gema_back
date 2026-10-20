@@ -29,4 +29,23 @@ export const cloudinaryService = {
       uploadStream.end(fileObject.buffer);
     });
   },
+
+  /**
+   * Borra un asset por su public_id. Es "mejor esfuerzo": un asset que no se pudo borrar
+   * es basura en la nube, no un motivo para fallar la operación de negocio que ya se hizo.
+   * Devuelve true si Cloudinary lo borró (o ya no existía).
+   */
+  destroy: async (publicId) => {
+    if (!publicId) return false;
+    try {
+      const { result } = await cloudinary.uploader.destroy(publicId, {
+        resource_type: 'image',
+        invalidate: true,
+      });
+      return result === 'ok' || result === 'not found';
+    } catch (error) {
+      console.error(`[cloudinary] No se pudo borrar "${publicId}":`, error?.message ?? error);
+      return false;
+    }
+  },
 };

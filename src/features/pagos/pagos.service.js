@@ -195,6 +195,15 @@ export const pagosService = {
       nuevoEstadoDeuda,
     });
 
+    // 💹 Split de ingresos: un pago MERCH/MIXTO aprobado deja su parte de merch
+    // (INGRESO_MERCH) separada de la matrícula (INGRESO_MATRICULA) en caja.
+    if (esAprobado) {
+      await merchService.registrarSplitIngresos(tx, {
+        pago: pagoActualizado,
+        usuarioAdminId: usuario_admin_id,
+      });
+    }
+
     // 🎓 PASO 6: GESTIÓN DE INSCRIPCIONES
     // 🚩 CAMBIO CLAVE: Quitamos la condición "&& esPagoCompleto"
     // Si 'activarAlumno' es true, significa que este pago (sea parcial o total) 

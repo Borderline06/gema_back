@@ -14,13 +14,18 @@ export const merchController = {
   }),
 
   crear: catchAsync(async (req, res) => {
-    const data = await merchService.crear(req.body);
+    const data = await merchService.crear(req.body, req.file);
     return apiResponse.created(res, { data, message: 'Producto creado exitosamente' });
   }),
 
   actualizar: catchAsync(async (req, res) => {
-    const data = await merchService.actualizar(req.params.id, req.body);
+    const data = await merchService.actualizar(req.params.id, req.body, req.file);
     return apiResponse.success(res, { data, message: 'Producto actualizado exitosamente' });
+  }),
+
+  eliminar: catchAsync(async (req, res) => {
+    const data = await merchService.eliminar(req.params.id);
+    return apiResponse.success(res, { data, message: 'Producto eliminado exitosamente' });
   }),
 
   coleccionAlumno: catchAsync(async (req, res) => {

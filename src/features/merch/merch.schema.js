@@ -8,21 +8,27 @@ const idPositivo = (nombre) =>
 
 // imagen_url admite una URL o una imagen en Base64 (data URI): columna TEXT, sin tope de 255.
 // El techo es solo un guardarraíl (~7.5 MB de imagen) que va por debajo del límite del body.
+// El camino normal es el archivo multipart (campo `imagen`), que se sube a Cloudinary; el
+// Base64 por JSON se conserva como fallback para clientes viejos.
 const MAX_IMAGEN_CHARS = 10_000_000;
+
+// En multipart todo llega como string: un campo vacío significa "sin valor".
+const vacioANull = (v) => (v === '' ? null : v);
+
+// "true"/"false" de multipart (o un booleano de JSON); ausente sigue siendo ausente.
+const booleanoOpcional = (v) => (v === undefined ? undefined : v === true || v === 'true');
 
 const productoBase = {
   nombre: z.string().trim().min(2, 'El nombre debe tener al menos 2 caracteres').max(150),
-  descripcion: z.string().trim().max(2000).nullable().optional(),
+  descripcion: z.preprocess(vacioANull, z.string().trim().max(2000).nullable().optional()),
   precio: z.coerce
     .number({ invalid_type_error: 'El precio debe ser numérico' })
     .nonnegative('El precio no puede ser negativo')
     .max(99999999, 'Precio fuera de rango'),
-  imagen_url: z
-    .string()
-    .trim()
-    .max(MAX_IMAGEN_CHARS, 'La imagen es demasiado grande')
-    .nullable()
-    .optional(),
+  imagen_url: z.preprocess(
+    vacioANull,
+    z.string().trim().max(MAX_IMAGEN_CHARS, 'La imagen es demasiado grande').nullable().optional()
+  ),
   stock: z.coerce.number().int('El stock debe ser un entero').nonnegative('El stock no puede ser negativo'),
   estado: z.enum(['ACTIVO', 'INACTIVO']),
 };
@@ -34,18 +40,18 @@ export const merchSchema = {
     estado: productoBase.estado.default('ACTIVO'),
   }),
 
-  updateMerchSchema: z
-    .object({
-      nombre: productoBase.nombre.optional(),
-      descripcion: productoBase.descripcion,
-      precio: productoBase.precio.optional(),
-      imagen_url: productoBase.imagen_url,
-      stock: productoBase.stock.optional(),
-      estado: productoBase.estado.optional(),
-    })
-    .refine((d) => Object.keys(d).length > 0, {
-      message: 'Debe proporcionar al menos un campo para actualizar',
-    }),
+  // Sin `.refine` de "al menos un campo": una petición con solo la foto trae el archivo en
+  // `req.file` y el body vacío. El servicio rechaza (400) si no llega ni campos ni archivo.
+  updateMerchSchema: z.object({
+    nombre: productoBase.nombre.optional(),
+    descripcion: productoBase.descripcion,
+    precio: productoBase.precio.optional(),
+    imagen_url: productoBase.imagen_url,
+    stock: productoBase.stock.optional(),
+    estado: productoBase.estado.optional(),
+    // Quita la foto actual (y la borra de Cloudinary) sin subir otra.
+    eliminar_imagen: z.preprocess(booleanoOpcional, z.boolean().optional()),
+  }),
 
   comprarSchema: z.object({
     alumno_id: idPositivo('alumno_id'),

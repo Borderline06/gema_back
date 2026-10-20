@@ -4,6 +4,21 @@ import { merchService } from '../merch/merch.service.js';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 const prisma = new PrismaClient();
 
+// Las filas INGRESO_MERCH / INGRESO_MATRICULA las genera la validación de un pago:
+// editarlas o borrarlas a mano las desalinearía del pago que las originó.
+const rechazarSiEsAutomatico = async (id) => {
+    const mov = await prisma.movimientos_financieros.findUnique({
+        where: { id: parseInt(id) },
+        select: { pago_id: true }
+    });
+    if (mov?.pago_id) {
+        throw new ApiError(
+            `Este movimiento lo generó el pago #${mov.pago_id} y no se puede modificar desde caja.`,
+            409
+        );
+    }
+};
+
 const getMonthLocal = (fecha) => {
     const date = new Date(fecha)
     return Number(
@@ -85,6 +100,7 @@ export const movimientosFinancierosService = {
         const mesHoy = getMonthLocal(new Date());
         const mesData = getMonthLocal(data.fecha_movimiento);
         if (mesData > mesHoy) throw new ApiError('Debe actualizar el ingreso/egreso en el mes actual.', 400);
+        await rechazarSiEsAutomatico(id);
         return await prisma.movimientos_financieros.update({
             where: { id: parseInt(id) },
             data: {
@@ -205,7 +221,9 @@ export const movimientosFinancierosService = {
         // Sin cambios: usan fecha_movimiento, no dependen de ciclos.
         const movimientos = await prisma.movimientos_financieros.findMany({
             where: {
-                fecha_movimiento: { gte: fechaInicio, lte: fechaFin }
+                fecha_movimiento: { gte: fechaInicio, lte: fechaFin },
+                // Las filas con pago_id (INGRESO_MERCH/INGRESO_MATRICULA) ya viajan en los pagos de arriba.
+                pago_id: null
             },
             include: { sedes: true }
         });
@@ -240,6 +258,7 @@ export const movimientosFinancierosService = {
 
     // Eliminar un movimiento
     eliminar: async (id) => {
+        await rechazarSiEsAutomatico(id);
         try {
             return await prisma.movimientos_financieros.delete({
                 where: { id: parseInt(id) }
@@ -284,12 +303,14 @@ export const movimientosFinancierosService = {
         // =========================================================
         const ingresosManualesAgg = await prisma.movimientos_financieros.aggregate({
             _sum: { monto: true },
-            where: { tipo_movimiento: 'INGRESO' }
+            // pago_id: null -> solo manuales. Las filas automáticas del split de pagos ya están
+            // contadas en los ingresos automáticos / merch suelto de arriba.
+            where: { tipo_movimiento: 'INGRESO', pago_id: null }
         });
 
         const egresosAgg = await prisma.movimientos_financieros.aggregate({
             _sum: { monto: true },
-            where: { tipo_movimiento: 'EGRESO' }
+            where: { tipo_movimiento: 'EGRESO', pago_id: null }
         });
 
         const totalIngresosManuales = Number(ingresosManualesAgg._sum.monto || 0);
@@ -368,6 +389,7 @@ export const movimientosFinancierosService = {
                 SUM(mf.monto) AS total
             FROM movimientos_financieros mf
             WHERE mf.fecha_movimiento BETWEEN ${fechaInicio} AND ${fechaFin}
+              AND mf.pago_id IS NULL
             GROUP BY EXTRACT(MONTH FROM mf.fecha_movimiento), mf.tipo_movimiento
             ORDER BY mes;
         `;

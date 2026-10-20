@@ -179,11 +179,19 @@ model movimientos_financieros {
   comprobante_url  String?  @db.VarChar(255)
   registrado_por   Int? // ID del administrador que registra el movimiento
   notas            String?  @db.Text
+  // Fila generada automáticamente al aprobar un pago (INGRESO_MERCH / INGRESO_MATRICULA).
+  // NULL = movimiento manual de caja. Los reportes que derivan ingresos desde `pagos`
+  // excluyen las filas con pago_id para no contar el mismo dinero dos veces.
+  pago_id          Int?
 
   // Relaciones
   metodos_pago  metodos_pago?  @relation(fields: [metodo_pago_id], references: [id], onDelete: SetNull)
   administrador administrador? @relation(fields: [registrado_por], references: [usuario_id], onDelete: SetNull)
   sedes         sedes?         @relation(fields: [sede_id], references: [id], onDelete: SetNull) // <--- NUEVA RELACIÓN
+  pagos         pagos?         @relation(fields: [pago_id], references: [id], onDelete: Cascade)
+
+  @@unique([pago_id, concepto])
+  @@index([pago_id])
 }
 
 model inscripciones_deudas_link {
@@ -221,39 +229,41 @@ model niveles_entrenamiento {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model pagos {
-  id                  Int                @id @default(autoincrement())
-  cuenta_id           Int
-  metodo_pago_id      Int
-  monto_pagado        Decimal            @db.Decimal(10, 2)
-  url_comprobante     String?            @db.VarChar(255)
-  codigo_operacion    String?            @db.VarChar(50)
-  fecha_pago          DateTime?          @default(now()) @db.Timestamp(6)
-  estado_validacion   String?            @default("PENDIENTE") @db.VarChar(20)
-  revisado_por        Int?
-  comprobante_enviado Boolean?           @default(false)
-  notas_validacion    String?            @db.VarChar(200)
+  id                      Int                       @id @default(autoincrement())
+  cuenta_id               Int
+  metodo_pago_id          Int
+  monto_pagado            Decimal                   @db.Decimal(10, 2)
+  url_comprobante         String?                   @db.VarChar(255)
+  codigo_operacion        String?                   @db.VarChar(50)
+  fecha_pago              DateTime?                 @default(now()) @db.Timestamp(6)
+  estado_validacion       String?                   @default("PENDIENTE") @db.VarChar(20)
+  revisado_por            Int?
+  comprobante_enviado     Boolean?                  @default(false)
+  notas_validacion        String?                   @db.VarChar(200)
   // 'MATRICULA' (default) | 'MERCH' (venta suelta) | 'MIXTO' (matrícula + merch)
-  tipo_transaccion    String             @default("MATRICULA") @db.VarChar(20)
-  cuentas_por_cobrar  cuentas_por_cobrar @relation(fields: [cuenta_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  metodos_pago        metodos_pago       @relation(fields: [metodo_pago_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  administrador       administrador?     @relation(fields: [revisado_por], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
-  alumno_merch        alumno_merch[]
+  tipo_transaccion        String                    @default("MATRICULA") @db.VarChar(20)
+  cuentas_por_cobrar      cuentas_por_cobrar        @relation(fields: [cuenta_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  metodos_pago            metodos_pago              @relation(fields: [metodo_pago_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  administrador           administrador?            @relation(fields: [revisado_por], references: [usuario_id], onDelete: NoAction, onUpdate: NoAction)
+  alumno_merch            alumno_merch[]
+  movimientos_financieros movimientos_financieros[]
 
   @@index([tipo_transaccion])
 }
 
 // Catálogo de merchandising (reemplaza el flag estático "incluye_camiseta").
 model merch {
-  id             Int            @id @default(autoincrement())
-  nombre         String         @db.VarChar(150)
-  descripcion    String?        @db.Text
-  precio         Decimal        @db.Decimal(10, 2)
-  imagen_url     String?        @db.Text // URL o imagen en Base64
-  stock          Int            @default(0)
-  estado         String         @default("ACTIVO") @db.VarChar(10) // 'ACTIVO' | 'INACTIVO'
-  creado_en      DateTime       @default(now()) @db.Timestamp(6)
-  actualizado_en DateTime       @default(now()) @db.Timestamp(6)
-  alumno_merch   alumno_merch[]
+  id               Int            @id @default(autoincrement())
+  nombre           String         @db.VarChar(150)
+  descripcion      String?        @db.Text
+  precio           Decimal        @db.Decimal(10, 2)
+  imagen_url       String?        @db.Text // URL de Cloudinary (o imagen Base64 legacy)
+  imagen_public_id String?        @db.VarChar(255) // public_id en Cloudinary; NULL si es Base64 legacy o sin imagen
+  stock            Int            @default(0)
+  estado           String         @default("ACTIVO") @db.VarChar(10) // 'ACTIVO' | 'INACTIVO'
+  creado_en        DateTime       @default(now()) @db.Timestamp(6)
+  actualizado_en   DateTime       @default(now()) @db.Timestamp(6)
+  alumno_merch     alumno_merch[]
 }
 
 // Colección del alumno: una fila por unidad adquirida.

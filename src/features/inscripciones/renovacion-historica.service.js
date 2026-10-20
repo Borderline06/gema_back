@@ -190,6 +190,8 @@ export const renovacionHistoricaService = {
 
     let r;
     try {
+      // El merch es de pago único: la renovación NUNCA reenvía merch_ids ni sede_recojo_id,
+      // aunque el ciclo anterior los haya incluido (ver tests/merch-ingresos-imagenes.test.js).
       r = await inscripcionService.inscribirPaquete({
         alumno_id: idAlumno,
         horario_ids: ids,

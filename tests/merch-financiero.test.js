@@ -25,6 +25,7 @@ const crearDb = ({ productos = [], links = [] } = {}) => {
       { id: 2, nombre: 'Cerrada', activo: false },
     ],
     notificaciones: [],
+    movimientos: [],
   };
   let seq = 100;
   const coincide = (fila, where = {}) =>
@@ -125,6 +126,15 @@ const crearDb = ({ productos = [], links = [] } = {}) => {
         return { count: antes - estado.items.length };
       },
     },
+    movimientos_financieros: {
+      findFirst: async ({ where }) =>
+        estado.movimientos.find((m) => m.pago_id === where.pago_id && m.concepto === where.concepto) ?? null,
+      create: async ({ data }) => {
+        const m = { id: ++seq, ...data };
+        estado.movimientos.push(m);
+        return m;
+      },
+    },
     inscripciones_deudas_link: {
       findMany: async ({ where }) => estado.links.filter((l) => l.cuenta_id === where.cuenta_id),
       count: async ({ where }) => estado.links.filter((l) => l.cuenta_id === where.cuenta_id).length,
@@ -186,6 +196,35 @@ test('compra independiente: pago APROBADO con tipo MERCH y montos que cuadran', 
   // Stock descontado.
   assert.equal(db.estado.merch.find((m) => m.id === 1).stock, 9);
   assert.equal(db.estado.merch.find((m) => m.id === 2).stock, 2);
+});
+
+test('compra independiente: deja su INGRESO_MERCH en caja por el total, ligado al pago', async () => {
+  const db = crearDb({ productos });
+  await merchService.comprarIndependiente(
+    { alumno_id: 7, sede_recojo_id: 1, merch_ids: [1, 2, 2, 2], metodo_pago_id: 4 },
+    99,
+    db
+  );
+
+  const [pago] = db.estado.pagos;
+  assert.equal(db.estado.movimientos.length, 1);
+  const [mov] = db.estado.movimientos;
+  assert.equal(mov.concepto, 'INGRESO_MERCH');
+  assert.equal(mov.tipo_movimiento, 'INGRESO');
+  assert.equal(mov.monto, pago.monto_pagado);
+  assert.equal(mov.monto, 149.99);
+  assert.equal(mov.pago_id, pago.id);
+  assert.equal(mov.metodo_pago_id, 4);
+  assert.equal(mov.registrado_por, 99);
+});
+
+test('compra independiente fallida (sin stock) no deja filas en caja', async () => {
+  const db = crearDb({ productos });
+  await assert.rejects(
+    merchService.comprarIndependiente({ alumno_id: 7, sede_recojo_id: 1, merch_ids: [2, 2, 2, 2, 2, 2], metodo_pago_id: 1 }, 99, db),
+    { statusCode: 409 }
+  );
+  assert.equal(db.estado.movimientos.length, 0);
 });
 
 test('compra independiente: sin stock responde 409 y no escribe nada', async () => {

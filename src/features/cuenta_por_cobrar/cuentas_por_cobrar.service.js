@@ -352,6 +352,8 @@ export const CuentasPorCobrarService = {
     if (!conceptoPaquete) throw new Error(`⛔ No existe un plan para ${paqueteActual.length} clases en el catálogo.`);
 
     // 💰 BL-002: el precio sale del catálogo, normalizado a 2 decimales.
+    // 🛍️ El merch es de pago único: el monto de la renovación es solo el plan, nunca
+    // arrastra ni suma el merch de la cuenta anterior (tests/merch-ingresos-imagenes.test.js).
     const montoTotal = redondear2(conceptoPaquete.precio_base);
     const fechaOriginalParaRevertir = paqueteActual[0].fecha_inscripcion;
 
@@ -447,6 +449,7 @@ export const CuentasPorCobrarService = {
       if (!conceptoPaquete) throw new Error(`⛔ No existe un plan para ${paqueteActual.length} clases en el catálogo.`);
 
       // 💰 BL-002: el precio sale del catálogo, normalizado a 2 decimales.
+      // 🛍️ Solo el plan: el merch (pago único) del ciclo anterior no se arrastra.
       const montoTotal = redondear2(conceptoPaquete.precio_base);
       const fechaOriginalParaRevertir = paqueteActual[0].fecha_inscripcion;
 
