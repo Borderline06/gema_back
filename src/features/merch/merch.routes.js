@@ -3,8 +3,7 @@ import { merchController } from './merch.controller.js';
 import { merchSchema } from './merch.schema.js';
 import { authenticate } from '../../shared/middlewares/auth.middleware.js';
 import { authorize } from '../../shared/middlewares/authorize.middleware.js';
-import { uploadMemory } from '../../shared/middlewares/upload.middleware.js';
-import { ApiError } from '../../shared/utils/error.util.js';
+import { subirImagen } from '../../shared/middlewares/upload.middleware.js';
 import {
   validate,
   validateParams,
@@ -13,23 +12,9 @@ import {
 
 const router = Router();
 
-/**
- * Foto opcional del producto (campo multipart `imagen`). Si la petición es JSON (clientes
- * viejos que mandan la imagen en Base64) multer no hace nada y el body pasa intacto.
- * Los errores de multer (tamaño, tipo) se devuelven como 400 en vez de caer en el 500.
- */
-const subirImagenMerch = (req, res, next) => {
-  uploadMemory.single('imagen')(req, res, (err) => {
-    if (!err) return next();
-    const message =
-      err.code === 'LIMIT_FILE_SIZE'
-        ? 'La imagen supera el máximo de 5 MB.'
-        : err.name === 'MulterError'
-          ? `Archivo inválido: ${err.message}`
-          : err.message;
-    return next(new ApiError(message, 400));
-  });
-};
+// Foto opcional del producto (campo multipart `imagen`, solo JPG/PNG/WEBP verificados por su
+// contenido). Si la petición es JSON (clientes viejos con Base64) el body pasa intacto.
+const subirImagenMerch = subirImagen('imagen');
 
 router.use(authenticate);
 

@@ -7,7 +7,7 @@ import {
   validateParams,
   validateQuery,
 } from '../../shared/middlewares/validate.middleware.js';
-import { uploadMemory } from '../../shared/middlewares/upload.middleware.js';
+import { subirImagen } from '../../shared/middlewares/upload.middleware.js';
 import { publicacionSchema } from './publicacion.schema.js';
 
 const router = Router();
@@ -30,7 +30,7 @@ router.use(authorize('Administrador'));
 
 router.post(
   '/',
-  uploadMemory.single('imagen'),
+  subirImagen('imagen'),
   validate(publicacionSchema.createSchema),
   publicacionController.createPublicacion
 );
@@ -38,7 +38,7 @@ router.post(
 router.put(
   '/:id',
   validateParams(publicacionSchema.idParamSchema),
-  uploadMemory.single('imagen'),
+  subirImagen('imagen'),
   validate(publicacionSchema.updateSchema),
   publicacionController.updatePublicacion
 );

@@ -197,8 +197,8 @@ const crearNube = () => {
   let n = 0;
   return {
     llamadas,
-    upload: async (archivo, carpeta) => {
-      llamadas.upload.push({ archivo, carpeta });
+    upload: async (archivo, carpeta, opciones) => {
+      llamadas.upload.push({ archivo, carpeta, opciones });
       n += 1;
       return { url: `https://res.cloudinary.com/demo/${carpeta}/nueva${n}.jpg`, publicId: `${carpeta}/nueva${n}` };
     },
@@ -246,6 +246,11 @@ test('crear con archivo: sube a Cloudinary y guarda secure_url + public_id', asy
   const r = await merchService.crear({ nombre: 'Polo', precio: 40, stock: 3, estado: 'ACTIVO' }, archivo, { db, nube });
 
   assert.equal(nube.llamadas.upload[0].carpeta, 'merch');
+  // Se guarda reducido (800 px máx., calidad auto) y se sirve con formato/calidad automáticos.
+  assert.deepEqual(nube.llamadas.upload[0].opciones, {
+    transformation: [{ width: 800, height: 800, crop: 'limit', quality: 'auto' }],
+    entrega: 'f_auto,q_auto',
+  });
   assert.equal(r.imagen_url, 'https://res.cloudinary.com/demo/merch/nueva1.jpg');
   assert.equal(r.imagen_public_id, 'merch/nueva1');
 });

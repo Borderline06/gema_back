@@ -35,9 +35,9 @@ export const pagosController = {
   // 🎟️ NUEVO: VENTA EXPRESS (Taquilla)
   // =================================================================
   registrarVentaExpress: catchAsync(async (req, res) => {
-    // Tomamos el ID del admin desde el token (si usas middleware authenticate)
-    // O si lo mandas desde el body, lo tomamos de ahí. (Por defecto 1 como salvavidas)
-    const adminId = req.user?.id || req.body.adminId || 1; 
+    // El admin sale SIEMPRE del token (la ruta exige authenticate + Administrador): un id
+    // enviado en el body ya no se acepta, así nadie puede registrar ventas a nombre de otro.
+    const adminId = req.user.id;
 
     const resultado = await pagosService.registrarVentaExpress(req.body, adminId);
 
@@ -58,14 +58,14 @@ export const pagosController = {
         pago_id,
         accion,
         notas,
-        usuario_admin_id,
         monto_real_confirmado,
         fecha_inicio_ciclo,
       } = req.body;
 
-      if (!usuario_admin_id) {
-        throw new Error('Se requiere el ID del administrador (usuario_admin_id).');
-      }
+      // 🔒 El revisor es quien está autenticado (la ruta exige Administrador). El
+      // `usuario_admin_id` del body ya no se usa: el front lo sigue mandando y se ignora,
+      // así nadie puede aprobar pagos a nombre de otro administrador.
+      const usuario_admin_id = req.user.id;
 
       // Preparamos el objeto completo para el servicio
       // ⚠️ Esta lista blanca descarta cualquier llave que no esté acá, así que

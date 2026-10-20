@@ -75,6 +75,13 @@ export const TIPO_TRANSACCION = { MATRICULA: 'MATRICULA', MERCH: 'MERCH', MIXTO:
 export const CONCEPTO_INGRESO = { MERCH: 'INGRESO_MERCH', MATRICULA: 'INGRESO_MATRICULA' };
 
 /**
+ * Misma regla que `calcularSaldosAlcancía` (pagos.logic.js): la deuda queda saldada cuando el
+ * saldo restante es <= 1 céntimo. `totalPagado` incluye el pago que se está procesando.
+ */
+export const esSaldoCompleto = (montoCuenta, totalPagado) =>
+  Math.max(0, Number(montoCuenta) - Number(totalPagado)) <= 0.01;
+
+/**
  * Reparte un pago aprobado entre la parte de merch y la de matrícula.
  *
  * La parte de merch es proporcional al peso del merch en la cuenta. Un abono parcial

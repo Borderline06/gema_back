@@ -22,6 +22,7 @@ import {
   armarAvisoListo,
   construirLineas,
   detalleMerch,
+  esSaldoCompleto,
   filasAlumnoMerch,
   filtroBusquedaAlumno,
   normalizarEstadoItem,
@@ -29,6 +30,14 @@ import {
 } from './logic/merch.logic.js';
 
 const CARPETA_CLOUDINARY_MERCH = 'merch';
+
+// Optimización de las fotos del catálogo: al subir se guarda reducido (máx. 800 px de lado,
+// calidad automática, sin conservar el original de hasta 5 MB) y la URL se sirve con
+// formato y calidad automáticos (WebP/AVIF cuando el navegador lo soporta).
+export const OPTIMIZACION_IMAGEN_MERCH = {
+  transformation: [{ width: 800, height: 800, crop: 'limit', quality: 'auto' }],
+  entrega: 'f_auto,q_auto',
+};
 
 // Estados de un ítem que cuentan como ingreso de merch: ya se cobró (RESERVADO no)
 // y no se reembolsó (DEVUELTO no). El ingreso se reconoce al pagar, no al entregar.
@@ -50,7 +59,7 @@ export const whereCuentaSoloMerch = {
  * Fila de ingreso en caja ligada a un pago (INGRESO_MERCH / INGRESO_MATRICULA). Idempotente
  * por (pago_id, concepto): si ya existe devuelve null y no escribe nada.
  */
-const crearFilaIngreso = async (db, { pago, concepto, monto, usuarioAdminId, tipo }) => {
+const crearFilaIngreso = async (db, { pago, concepto, monto, usuarioAdminId, tipo, fecha }) => {
   const existente = await db.movimientos_financieros.findFirst({
     where: { pago_id: pago.id, concepto },
     select: { id: true },
@@ -65,6 +74,7 @@ const crearFilaIngreso = async (db, { pago, concepto, monto, usuarioAdminId, tip
       registrado_por: usuarioAdminId ? Number(usuarioAdminId) : null,
       pago_id: pago.id,
       notas: `Pago #${pago.id} · cuenta #${pago.cuenta_id} (${tipo})`,
+      ...(fecha && { fecha_movimiento: fecha }),
     },
   });
 };
@@ -145,7 +155,7 @@ export const merchService = {
     const { eliminar_imagen: _ignorado, ...campos } = data;
     let subida = null;
     if (archivo) {
-      subida = await nube.upload(archivo, CARPETA_CLOUDINARY_MERCH);
+      subida = await nube.upload(archivo, CARPETA_CLOUDINARY_MERCH, OPTIMIZACION_IMAGEN_MERCH);
       campos.imagen_url = subida.url;
       campos.imagen_public_id = subida.publicId;
     } else if (campos.imagen_url) {
@@ -179,7 +189,7 @@ export const merchService = {
 
     let subida = null;
     if (archivo) {
-      subida = await nube.upload(archivo, CARPETA_CLOUDINARY_MERCH);
+      subida = await nube.upload(archivo, CARPETA_CLOUDINARY_MERCH, OPTIMIZACION_IMAGEN_MERCH);
       campos.imagen_url = subida.url;
       campos.imagen_public_id = subida.publicId;
     } else if (eliminar_imagen) {
@@ -533,7 +543,7 @@ export const merchService = {
    * Las filas llevan `pago_id`; los reportes que derivan ingresos desde `pagos` las excluyen
    * para no contar el mismo dinero dos veces. Idempotente por (pago_id, concepto).
    */
-  registrarSplitIngresos: async (tx, { pago, usuarioAdminId }) => {
+  registrarSplitIngresos: async (tx, { pago, usuarioAdminId, esPagoCompleto }) => {
     const tipo = await merchService.tipoTransaccionDeCuenta(tx, pago.cuenta_id);
     if (tipo === TIPO_TRANSACCION.MATRICULA) return [];
 
@@ -557,16 +567,41 @@ export const merchService = {
     });
     const merchYaRegistrado = aMonto(previos.reduce((acc, m) => acc + aCentimos(m.monto), 0));
 
-    const saldos = await tx.pagos.aggregate({
-      _sum: { monto_pagado: true },
-      where: { cuenta_id: Number(pago.cuenta_id), estado_validacion: 'APROBADO' },
-    });
-    const esPagoCompleto =
-      aCentimos(saldos._sum.monto_pagado ?? 0) >= aCentimos(cuenta?.monto_final ?? 0);
+    // validarPago ya calculó esto (calcularSaldosAlcancía) y lo pasa tal cual. Si no viene,
+    // se recalcula con la MISMA regla: saldo restante <= 1 céntimo.
+    let completo = esPagoCompleto;
+    if (completo === undefined) {
+      const saldos = await tx.pagos.aggregate({
+        _sum: { monto_pagado: true },
+        where: { cuenta_id: Number(pago.cuenta_id), estado_validacion: 'APROBADO' },
+      });
+      completo = esSaldoCompleto(cuenta?.monto_final ?? 0, saldos._sum.monto_pagado ?? 0);
+    }
 
+    return merchService.escribirSplitIngresos(tx, {
+      pago,
+      tipo,
+      montoCuenta: cuenta?.monto_final ?? 0,
+      merchTotal,
+      merchYaRegistrado,
+      esPagoCompleto: completo,
+      usuarioAdminId,
+    });
+  },
+
+  /**
+   * Calcula el reparto merch/matrícula de UN pago y escribe sus filas (las que tengan monto).
+   * Es el único punto que escribe el split: lo usan validarPago (en vivo) y la regularización
+   * histórica, así ambos reparten exactamente igual. `fecha` solo la pasa el histórico para
+   * que la fila caiga en el mes en que se cobró el pago. Devuelve solo las filas nuevas.
+   */
+  escribirSplitIngresos: async (
+    db,
+    { pago, tipo, montoCuenta, merchTotal, merchYaRegistrado, esPagoCompleto, usuarioAdminId, fecha }
+  ) => {
     const { merch, matricula } = calcularSplitIngresos({
       montoPago: pago.monto_pagado,
-      montoCuenta: cuenta?.monto_final ?? 0,
+      montoCuenta,
       merchTotal,
       merchYaRegistrado,
       esPagoCompleto,
@@ -579,7 +614,7 @@ export const merchService = {
 
     const creadas = [];
     for (const { concepto, monto } of filas) {
-      const fila = await crearFilaIngreso(tx, { pago, concepto, monto, usuarioAdminId, tipo });
+      const fila = await crearFilaIngreso(db, { pago, concepto, monto, usuarioAdminId, tipo, fecha });
       if (fila) creadas.push(fila);
     }
     return creadas;

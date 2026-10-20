@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { ApiError } from '../../shared/utils/error.util.js';
 import { merchService } from '../merch/merch.service.js';
+import { armarDesgloseIngresos } from './desglose-ingresos.logic.js';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 const prisma = new PrismaClient();
 
@@ -113,6 +114,60 @@ export const movimientosFinancierosService = {
                 sede_id: data.sede_id,
                 fecha_movimiento: data.fecha_movimiento,
             }
+        });
+    },
+
+    /**
+     * Desglose "Merch vs Matrícula" de lo COBRADO en un mes (por fecha de pago), para auditoría.
+     *
+     * Es un endpoint aparte (y no una llave más de `obtenerResumenMensual`) porque ese resumen es
+     * un mapa indexado por sede: cualquier llave extra se leería como una sede y rompería la
+     * tabla y el Excel.
+     *
+     *   - merch      = suma de las filas INGRESO_MERCH del mes (ventas de taquilla, órdenes de
+     *                  alumno y la parte de merch de los pagos MIXTO).
+     *   - matricula  = todo lo cobrado en el mes menos el merch. Las filas INGRESO_MATRICULA solo
+     *                  existen en pagos MIXTO, así que no sirven como total de matrícula.
+     *   - movimientos = las filas automáticas del mes (concepto, monto, alumno y pago de origen)
+     *                  para poder cuadrar cada sol contra su pago.
+     */
+    obtenerDesgloseIngresos: async (mes, anio) => {
+        const mesInt = parseInt(mes);
+        const anioInt = parseInt(anio);
+        if (!Number.isInteger(mesInt) || mesInt < 1 || mesInt > 12 || !Number.isInteger(anioInt)) {
+            throw new ApiError("Parámetros 'mes' (1-12) y 'anio' inválidos", 400);
+        }
+        // Mismo rango que obtenerResumenMensual.
+        const fechaInicio = new Date(anioInt, mesInt - 1, 1);
+        const fechaFin = new Date(anioInt, mesInt, 0, 23, 59, 59);
+
+        const [cobrado, filas] = await Promise.all([
+            prisma.pagos.aggregate({
+                _sum: { monto_pagado: true },
+                where: { estado_validacion: 'APROBADO', fecha_pago: { gte: fechaInicio, lte: fechaFin } }
+            }),
+            prisma.movimientos_financieros.findMany({
+                where: { pago_id: { not: null }, fecha_movimiento: { gte: fechaInicio, lte: fechaFin } },
+                orderBy: [{ fecha_movimiento: 'asc' }, { id: 'asc' }],
+                include: {
+                    pagos: {
+                        select: {
+                            id: true,
+                            tipo_transaccion: true,
+                            cuentas_por_cobrar: {
+                                select: { alumnos: { select: { usuarios: { select: { nombres: true, apellidos: true } } } } }
+                            }
+                        }
+                    }
+                }
+            })
+        ]);
+
+        return armarDesgloseIngresos({
+            mes: mesInt,
+            anio: anioInt,
+            totalCobrado: cobrado._sum.monto_pagado,
+            filas
         });
     },
 

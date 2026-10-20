@@ -201,6 +201,7 @@ export const pagosService = {
       await merchService.registrarSplitIngresos(tx, {
         pago: pagoActualizado,
         usuarioAdminId: usuario_admin_id,
+        esPagoCompleto, // el mismo que decidió el estado de la deuda (calcularSaldosAlcancía)
       });
     }
 

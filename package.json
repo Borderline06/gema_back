@@ -20,6 +20,7 @@
     "db:seed": "prisma db seed",
     "db:seed:demo": "node prisma/seed-demo.js",
     "db:repair:ciclos": "node prisma/repair-fechas-ciclo-BL011.js",
+    "db:repair:ingresos-mixtos": "node --env-file=.env prisma/repair-ingresos-mixtos.js",
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset"
   },
