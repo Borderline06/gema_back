@@ -28,7 +28,7 @@ src/features/health/
 {
   "status": "success",
   "statusCode": 200,
-  "message": "Gema Academy API is running",
+  "message": "G+ API is running",
   "data": {
     "timestamp": "2026-03-01T22:00:00.000Z"
   }

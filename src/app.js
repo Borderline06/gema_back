@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { logger } from './shared/utils/logger.util.js';
 
-import { CORS_CREDENTIALS, CORS_ORIGIN } from './config/secret.config.js';
+import { CORS_CREDENTIALS, CORS_ORIGIN, COMPANY_NAME } from './config/secret.config.js';
 import { errorHandler } from './shared/middlewares/error.middleware.js';
 
 import healthRoutes from './features/health/health.routes.js';
@@ -53,7 +53,7 @@ const corsOriginList = Array.isArray(CORS_ORIGIN) ? CORS_ORIGIN : [CORS_ORIGIN].
 const normalizeOrigin = (origin) => origin.replace(/\/$/, '');
 
 // Healthcheck route BEFORE CORS so it doesn't get blocked by strict origin policies
-app.get('/', (req, res) => res.status(200).send('Gema Academy API is alive!'));
+app.get('/', (req, res) => res.status(200).send(`${COMPANY_NAME} API is alive!`));
 app.use('/health', healthRoutes);
 
 app.use(
