@@ -209,8 +209,7 @@ S += [P("5. Campo usuario_id de notificaciones (caso 13)", h1),
       P("La tabla de notificaciones tiene dos campos para indicar a quien pertenece cada aviso: <b>alumno_id</b> (casi todos) y <b>usuario_id</b> (pensado "
         "para avisos a administradores). En los datos de prueba, usuario_id esta vacio en 4.966 de 4.967 filas. La pregunta es si se puede eliminar el campo."),
       P("Conclusion", h2),
-      P("<b>Se puede eliminar sin perder datos, pero no es un cambio gratuito: hay codigo que lo usa.</b> Recomendamos no hacerlo dentro de la migracion de datos "
-        "sino como un cambio aparte, en otra rama."),
+      P("<b>El campo se puede eliminar sin perder datos y se realizara este cambio.</b> Hay codigo que lo usa y se ajustara junto con el campo (detalle abajo)."),
       P("Datos", h2),
       tabla([cab(["Dato", "Resultado"]),
              [P("Filas que usan usuario_id"), P("1 de 4.967: el aviso 'Pase Generado' del 27/05/2026, del administrador Eddy")]],
@@ -223,7 +222,7 @@ S += [P("5. Campo usuario_id de notificaciones (caso 13)", h1),
             [55 * mm, W - 55 * mm]),
       P("Efecto funcional", h2),
       P("Un administrador no es alumno, por lo que sin ese campo no podria recibir notificaciones propias. Hoy solo recibe las de 'Pase Generado', asi que el efecto "
-        "practico es pequeno, pero seria una funcionalidad que se retira. Antes de decidir conviene saber si el nuevo sistema usara el mismo codigo que el original."),
+        "practico es pequeno, pero seria una funcionalidad que se retira."),
       Spacer(1, 10),
       P("Fin del documento", nota)]
 
