@@ -2,12 +2,15 @@ import { Router } from 'express';
 import { alumnoController } from './alumno.controller.js';
 import { authenticate } from '../../shared/middlewares/auth.middleware.js';
 import { authorize } from '../../shared/middlewares/authorize.middleware.js';
-import { validate } from '../../shared/middlewares/validate.middleware.js';
+import { validate, validateParams } from '../../shared/middlewares/validate.middleware.js';
 import {
   actualizarPerfilSchema,
   crearContactoSchema,
   actualizarContactoSchema,
+  actualizarContactoEmergenciaSchema,
 } from './alumno.schema.js';
+// 🆕 BL-007: reusamos el validador de :id que ya existe en usuarios.
+import { commonUsuarioSchemas } from '../usuarios/schemas/common.schema.js';
 
 const router = Router();
 
@@ -53,5 +56,22 @@ router.post(
     authorize('Administrador'),
     alumnoController.cambiarHistorialAlumno
 )
+
+// ==========================================================================
+// 🆕 BL-007: PATCH /api/alumnos/:id/contacto-emergencia
+//
+// Declarada AL FINAL, después de todas las rutas literales (/mi-perfil*,
+// /gestion/*), para que un segmento dinámico no pueda capturarlas.
+//
+// El rol Alumno entra en authorize y el filtro fino (solo su propio :id) lo
+// hace el controller.
+// ==========================================================================
+router.patch(
+    '/:id/contacto-emergencia',
+    authorize('Administrador', 'Coordinador', 'Alumno'),
+    validateParams(commonUsuarioSchemas.idParamSchema),
+    validate(actualizarContactoEmergenciaSchema),
+    alumnoController.actualizarContactoEmergencia
+);
 
 export default router;

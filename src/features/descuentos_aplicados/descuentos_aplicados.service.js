@@ -1,5 +1,8 @@
 import { prisma } from '../../config/database.config.js';
 import { ApiError } from '../../shared/utils/error.util.js';
+// 💰 BL-002: el reparto del puente vive en un solo sitio.
+import { redondear2 } from '../../shared/utils/dinero.util.js';
+import { sincronizarPuenteDeuda } from '../../shared/utils/deuda-puente.util.js';
 
 export const DescuentosAplicadosService = {
  async aplicar({ cuenta_id, tipo_beneficio_id, admin_id, motivo }) {
@@ -31,13 +34,15 @@ export const DescuentosAplicadosService = {
     }
 
     // 4. Lógica de cálculo (Monto Fijo vs Porcentaje)
-    const deudaActual = Number(cuenta.monto_final || 0);
+    const deudaActual = redondear2(cuenta.monto_final || 0);
     const valorNominal = Number(beneficio.valor_por_defecto);
 
     let descuentoReal = beneficio.es_porcentaje ? deudaActual * (valorNominal / 100) : valorNominal;
 
     // Protección contra saldos negativos
-    const descuentoFinal = descuentoReal > deudaActual ? deudaActual : descuentoReal;
+    // 💰 BL-002: a céntimos, para que lo que se guarda en
+    // monto_dinero_descontado sea exactamente lo que se restó del monto_final.
+    const descuentoFinal = redondear2(descuentoReal > deudaActual ? deudaActual : descuentoReal);
 
     // --- TRANSACCIÓN ATÓMICA ---
     return await prisma.$transaction(async (tx) => {
@@ -55,7 +60,7 @@ export const DescuentosAplicadosService = {
       });
 
       // Paso B: Actualizar el monto_final en la cuenta
-      const nuevoMonto = deudaActual - descuentoFinal;
+      const nuevoMonto = redondear2(deudaActual - descuentoFinal);
 
       await tx.cuentas_por_cobrar.update({
         where: { id: cuenta_id },
@@ -67,19 +72,10 @@ export const DescuentosAplicadosService = {
       });
 
       // 🔥 PASO C: RE-EQUILIBRAR EL PUENTE (Sincronización de Alcancía)
-      // Buscamos cuántas inscripciones están amarradas a esta cuenta
-      const links = await tx.inscripciones_deudas_link.findMany({
-        where: { cuenta_id: cuenta_id }
-      });
-
-      if (links.length > 0) {
-        const nuevoMontoPorSlot = nuevoMonto / links.length;
-
-        await tx.inscripciones_deudas_link.updateMany({
-          where: { cuenta_id: cuenta_id },
-          data: { monto_asignado: nuevoMontoPorSlot }
-        });
-      }
+      // 💰 BL-002: antes era `nuevoMonto / links.length` con un updateMany, así
+      // que el céntimo del residuo se perdía (un descuento del 15% sobre el plan
+      // de 3 clases dejaba 113.33 x3 = 339.99 contra un monto_final de 340.00).
+      await sincronizarPuenteDeuda(tx, cuenta_id, nuevoMonto);
 
       return {
         descuentoFinal,
@@ -119,8 +115,10 @@ export const DescuentosAplicadosService = {
       }
 
       // Actualizamos la cuenta (esto sí debe pasar siempre para que el saldo sea real)
-      const montoARestaurar = Number(descuento.monto_dinero_descontado);
-      const nuevaDeuda = Number(descuento.cuentas_por_cobrar.monto_final) + montoARestaurar;
+      const montoARestaurar = redondear2(descuento.monto_dinero_descontado);
+      const nuevaDeuda = redondear2(
+        redondear2(descuento.cuentas_por_cobrar.monto_final) + montoARestaurar
+      );
 
       await tx.cuentas_por_cobrar.update({
         where: { id: descuento.cuenta_id },
@@ -131,18 +129,8 @@ export const DescuentosAplicadosService = {
       });
 
       // 🔥 PASO ADICIONAL: RE-EQUILIBRAR EL PUENTE (Al restaurar precio original)
-      const links = await tx.inscripciones_deudas_link.findMany({
-        where: { cuenta_id: descuento.cuenta_id }
-      });
-
-      if (links.length > 0) {
-        const montoRestauradoPorSlot = nuevaDeuda / links.length;
-
-        await tx.inscripciones_deudas_link.updateMany({
-          where: { cuenta_id: descuento.cuenta_id },
-          data: { monto_asignado: montoRestauradoPorSlot }
-        });
-      }
+      // 💰 BL-002: mismo reparto exacto que en aplicar().
+      await sincronizarPuenteDeuda(tx, descuento.cuenta_id, nuevaDeuda);
 
       return await tx.descuentos_aplicados.delete({
         where: { id: descuento_id },

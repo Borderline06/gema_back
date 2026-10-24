@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { logger } from './shared/utils/logger.util.js';
 
-import { CORS_CREDENTIALS, CORS_ORIGIN } from './config/secret.config.js';
+import { CORS_CREDENTIALS, CORS_ORIGIN, COMPANY_NAME } from './config/secret.config.js';
 import { errorHandler } from './shared/middlewares/error.middleware.js';
 
 import healthRoutes from './features/health/health.routes.js';
@@ -39,6 +39,7 @@ import feriadoRoutes from './features/feriados/feriado.routes.js';
 import cajaRoutes from './features/movimientos_financieros/movimientos-financieros.route.js';
 import historialAcademicoRoutes from './features/VistasEspecificas/historial_academico/historial_academico.routes.js'; // 🆕
 
+import merchRoutes from './features/merch/merch.routes.js';
 import anunciosBeneficio from './features/anunciosBeneficios/anunciosBeneficios.routes.js';
 
 const app = express();
@@ -52,7 +53,7 @@ const corsOriginList = Array.isArray(CORS_ORIGIN) ? CORS_ORIGIN : [CORS_ORIGIN].
 const normalizeOrigin = (origin) => origin.replace(/\/$/, '');
 
 // Healthcheck route BEFORE CORS so it doesn't get blocked by strict origin policies
-app.get('/', (req, res) => res.status(200).send('Gema Academy API is alive!'));
+app.get('/', (req, res) => res.status(200).send(`${COMPANY_NAME} API is alive!`));
 app.use('/health', healthRoutes);
 
 app.use(
@@ -86,6 +87,9 @@ app.use(
   })
 );
 app.use(cookieParser());
+// Merch recibe imágenes en Base64: el límite por defecto (100 kb) las rechazaría con 413.
+// Va ANTES del parser global; body-parser omite una petición que ya fue parseada.
+app.use('/api/merch', express.json({ limit: '12mb' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -112,6 +116,9 @@ app.use('/api/lesiones', lesionRoutes);
 app.use('/api/tipos-documento', tipoDocumentosRoutes);
 app.use('/api/beneficioPendiente', beneficioPendiente);
 app.use('/api/alumno', alumnoRoutes);
+// 🆕 BL-007: alias en plural para PATCH /api/alumnos/:id/contacto-emergencia.
+// El singular sigue montado, así que ninguna ruta existente cambia.
+app.use('/api/alumnos', alumnoRoutes);
 app.use('/api/publicaciones', publicacionRoutes);
 app.use('/api/notificaciones', notificacionesRoutes);
 app.use('/api/metodos-pago', metodosPago);
@@ -119,7 +126,8 @@ app.use('/api/coordinadores', coordinadorRoutes);
 app.use('/api/feriados', feriadoRoutes);
 app.use('/api/anuncios-beneficios',anunciosBeneficio)
 app.use('/api/caja', cajaRoutes);
-app.use('/api/historial-academico', historialAcademicoRoutes); // 🆕
+app.use('/api/merch', merchRoutes);
+app.use('/api/historial-academico', historialAcademicoRoutes); // ya p elmer no me apures xd
 
 app.use(errorHandler);
 

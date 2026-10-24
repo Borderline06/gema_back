@@ -6,8 +6,20 @@ import * as Logic from './logic/pagos.logic.js';
 import * as Utils from './utils/pagos.util.js';
 import { notificacionesService } from '../notificaciones/notificaciones.service.js';
 import { inscripcionService } from '../inscripciones/inscripcion.service.js';
+import { merchService } from '../merch/merch.service.js';
 // 🎯 BL-001: una sola definición de "es individual" en todo el backend.
 import { esIndividual } from '../../shared/utils/tipo-inscripcion.util.js';
+// 🆕 BL-006: la fecha de inicio que manda el admin se normaliza con el mismo
+// helper (y el mismo ancla a mediodía) que el resto de escritores de ciclo.
+import { parsearFechaInicioCiclo } from '../../shared/utils/ciclo.util.js';
+// 🆕 BL-006: si la fecha nueva mueve la clase de una INDIVIDUAL, hay que
+// resolverla y validarla con las MISMAS funciones que usó la venta (BL-003).
+import { calcularPrimeraFechaClase } from '../../shared/utils/clase-fecha.util.js';
+import {
+  validarAforoFechaClase,
+  validarFechaNoFeriado,
+} from '../inscripciones/validators/inscripcion.validator.js';
+import { ApiError } from '../../shared/utils/error.util.js';
 
 export const pagosService = {
   // 1. REGISTRAR EL PAGO (Integrado con Cloudinary 🚀)
@@ -42,8 +54,11 @@ export const pagosService = {
       const metodoPagoId = await Logic.resolverMetodoPagoId(tx, metodo_pago);
 
       // 📝 PASO C: CREAR EL REGISTRO DE PAGO
+      // 🛍️ MERCH: 'MIXTO' si la cuenta lleva merch reservado, 'MATRICULA' si no.
+      const tipoTransaccion = await merchService.tipoTransaccionDeCuenta(tx, deuda_id);
       const nuevoPago = await tx.pagos.create({
         data: {
+          tipo_transaccion: tipoTransaccion,
           cuenta_id: parseInt(deuda_id),
           metodo_pago_id: metodoPagoId,
           monto_pagado: parseFloat(monto),
@@ -60,10 +75,14 @@ export const pagosService = {
         data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
       });
 
-      const inscripcionesUpdate = await tx.inscripciones.updateMany({
-        where: { alumno_id: deuda.alumno_id, estado: 'PENDIENTE_PAGO' },
-        data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
-      });
+      // 🛍️ El voucher de una orden de merch no debe asegurar cupos de una matrícula ajena.
+      const esOrdenMerch = tipoTransaccion === 'MERCH';
+      const inscripcionesUpdate = esOrdenMerch
+        ? { count: 0 }
+        : await tx.inscripciones.updateMany({
+            where: { alumno_id: deuda.alumno_id, estado: 'PENDIENTE_PAGO' },
+            data: { estado: 'POR_VALIDAR', actualizado_en: new Date() },
+          });
 
       return {
         success: true,
@@ -80,12 +99,32 @@ export const pagosService = {
 
   // 2. VALIDAR EL PAGO (Tu lógica + Corrección de Monto + Sincronización de Fechas 🛡️)
   validarPago: async (data, tx = null) => {
-  const { pago_id, accion, usuario_admin_id, notas, monto_real_confirmado } = data;
+  const {
+    pago_id,
+    accion,
+    usuario_admin_id,
+    notas,
+    monto_real_confirmado,
+    // 🆕 BL-006: opcional. Si no viene, el flujo es exactamente el de antes.
+    fecha_inicio_ciclo,
+  } = data;
   const esAprobado = accion === 'APROBAR';
 
   if (!['APROBAR', 'RECHAZAR'].includes(accion)) {
     throw new Error('La acción debe ser APROBAR o RECHAZAR.');
   }
+
+  // =================================================================
+  // 🆕 BL-006: fecha de inicio de ciclo que decide el admin al validar.
+  //
+  // Se normaliza ACÁ, FUERA de la $transaction, para que un formato inválido
+  // responda 400 sin haber tocado la BD (misma razón por la que parsearMesAnio
+  // se llama fuera del try de los servicios).
+  //
+  // Solo tiene sentido al APROBAR: un RECHAZAR no abre ningún ciclo, así que
+  // la fecha se ignora en vez de hacer fallar la validación del pago.
+  // =================================================================
+  const nuevoInicio = esAprobado ? parsearFechaInicioCiclo(fecha_inicio_ciclo) : null;
 
   const ejecutar = async (tx) => {
     // 🛡️ PASO 1: Buscar y Validar el pago
@@ -145,6 +184,27 @@ export const pagosService = {
       data: { estado: nuevoEstadoDeuda },
     });
 
+    // 🛍️ MERCH: la mercancía física solo se entrega con la deuda en 0. Un abono
+    // parcial NO pasa los ítems a POSEE (siguen RESERVADO); un rechazo sin abonos
+    // previos suelta la reserva y devuelve el stock.
+    await merchService.procesarPagoValidado(tx, {
+      cuentaId: pago.cuenta_id,
+      pagoId: pago.id,
+      esAprobado,
+      esPagoCompleto,
+      nuevoEstadoDeuda,
+    });
+
+    // 💹 Split de ingresos: un pago MERCH/MIXTO aprobado deja su parte de merch
+    // (INGRESO_MERCH) separada de la matrícula (INGRESO_MATRICULA) en caja.
+    if (esAprobado) {
+      await merchService.registrarSplitIngresos(tx, {
+        pago: pagoActualizado,
+        usuarioAdminId: usuario_admin_id,
+        esPagoCompleto, // el mismo que decidió el estado de la deuda (calcularSaldosAlcancía)
+      });
+    }
+
     // 🎓 PASO 6: GESTIÓN DE INSCRIPCIONES
     // 🚩 CAMBIO CLAVE: Quitamos la condición "&& esPagoCompleto"
     // Si 'activarAlumno' es true, significa que este pago (sea parcial o total) 
@@ -160,19 +220,128 @@ export const pagosService = {
         }
       });
 
+      // =============================================================
+      // 🤝 BL-010: PRE-VALIDAR CHOQUES CON RECUPERACIONES ANTES DE MUTAR.
+      //
+      // Si alguna clase del ciclo (o la clase única) coincide con una
+      // recuperación PROGRAMADA del alumno, validarChoquesCiclo lanza un 409
+      // ANTES de tocar inscripción, link o clases. El throw revierte toda la
+      // $transaction: el pago queda pendiente y el admin decide qué hacer. La
+      // misma comprobación vive en los generadores, así que esto solo
+      // adelanta el fallo y le da al admin el error de TODO el paquete.
+      // =============================================================
+      for (const link of links) {
+        const insc = link.inscripciones;
+        if (insc.estado !== 'POR_VALIDAR') continue;
+
+        await asistenciaService.validarChoquesCiclo(tx, {
+          inscripcion_id: insc.id,
+          dia_semana: insc.horarios_clases.dia_semana,
+          coordinador_id: insc.horarios_clases.coordinador_id,
+          fecha_inicio: nuevoInicio ?? insc.fecha_inscripcion,
+          tipo_inscripcion: insc.tipo_inscripcion,
+          alumno_id: insc.alumno_id,
+          hora_inicio: insc.horarios_clases.hora_inicio,
+        });
+      }
+
+      // 🆕 BL-006: a cuántas inscripciones se les aplicó de verdad la fecha.
+      let inscripcionesConFechaAplicada = 0;
+
       for (const link of links) {
         const insc = link.inscripciones;
 
         // 🛡️ SEGURO: Solo activar y generar clases si la inscripción está 'POR_VALIDAR'
         // Esto evita que si el alumno hace un SEGUNDO abono parcial, se le vuelvan a generar clases.
         if (insc.estado === 'POR_VALIDAR') {
+
+          // =============================================================
+          // 🆕 BL-006: VALIDAR LA FECHA NUEVA ANTES DE MUTAR NADA.
+          //
+          // Para una INDIVIDUAL la fecha de inicio MUEVE la clase, así que hay
+          // que comprobar que el día destino exista (no sea feriado) y tenga
+          // cupo. Si falla, el throw hace rollback de toda la $transaction: el
+          // pago se queda PENDIENTE y el admin reintenta con otra fecha. Se
+          // rechaza la FECHA, no el pago.
+          //
+          // 🔒 Se reusa calcularPrimeraFechaClase con la MISMA ventana de 7
+          // días que usará generarClaseUnica, así que la fecha que validamos es
+          // por construcción la que se insertará. Y como validamos que no sea
+          // feriado, el salto de +7 días de generarClaseUnica no se dispara.
+          // =============================================================
+          let fechaClaseNueva = null;
+          if (nuevoInicio && esIndividual(insc)) {
+            fechaClaseNueva = calcularPrimeraFechaClase(
+              nuevoInicio,
+              insc.horarios_clases.dia_semana
+            );
+
+            if (!fechaClaseNueva) {
+              throw new ApiError(
+                '⛔ No se pudo determinar la fecha de la clase para la fecha de inicio indicada.',
+                400
+              );
+            }
+
+            await validarFechaNoFeriado(tx, fechaClaseNueva);
+            await validarAforoFechaClase(tx, insc.horarios_clases, fechaClaseNueva);
+          }
+
           await tx.inscripciones.update({
             where: { id: insc.id },
             data: {
               estado: 'ACTIVO',
-              actualizado_en: new Date()
+              actualizado_en: new Date(),
+              // 🆕 BL-006: fecha_inscripcion es el ancla de la que dependen el
+              // cron VERDUGO (cierre a los 30 días), el calcularFechaCorte del
+              // historial y la ventana de 7 días de la INDIVIDUAL. Moverla es
+              // justo lo que hace que el cierre del ciclo se recalcule solo,
+              // sin escribir el +30 a mano.
+              // ⚠️ Para una INDIVIDUAL guarda el INICIO, NO la fecha de clase
+              // (ver el invariante en inscripcion.service.js -> inscribirIndividual).
+              ...(nuevoInicio && {
+                fecha_inscripcion: nuevoInicio,
+                fecha_inscripcion_original: nuevoInicio,
+              }),
             },
           });
+
+          // =============================================================
+          // 🆕 BL-006: sincronizar el ciclo del link con la fecha confirmada.
+          //
+          // Por link.id y NO updateMany por cuenta_id: una inscripción puede
+          // tener varios links (un ciclo por renovación) y solo nos toca el de
+          // esta cuenta.
+          // =============================================================
+          if (nuevoInicio) {
+            await tx.inscripciones_deudas_link.update({
+              where: { id: link.id },
+              data: esIndividual(insc)
+                ? {
+                    // 🚩 BL-001: una clase suelta nace CERRADA el día de la
+                    // clase, igual que en inscribirIndividual.
+                    fecha_inicio_ciclo: fechaClaseNueva,
+                    fecha_fin_ciclo: fechaClaseNueva,
+                  }
+                : {
+                    // 🚩 REGULAR: fecha_fin_ciclo se queda en NULL = VIGENTE.
+                    // El +30 NO se escribe acá a propósito: lo deriva
+                    // finCicloEfectivo() y lo cierra el cron VERDUGO contando
+                    // desde fecha_inscripcion, que acabamos de mover. Escribirlo
+                    // rompería es_vigente del historial (filaCiclo lo define como
+                    // fecha_fin_ciclo === null), el VERDUGO y la renovación, que
+                    // buscan los links con fecha_fin_ciclo: null.
+                    fecha_inicio_ciclo: nuevoInicio,
+                    fecha_fin_ciclo: null,
+                  },
+            });
+            inscripcionesConFechaAplicada += 1;
+          }
+
+          // 🆕 BL-006: las clases salen de la fecha confirmada. Sin esto se
+          // generarían desde la fecha de venta y contradirían el ciclo que
+          // acabamos de guardar.
+          const fechaInicioClases = nuevoInicio ?? insc.fecha_inscripcion;
 
           // 🚩 BL-001: antes era una comparación estricta contra el string.
           // esIndividual() tolera NULL, minúsculas y espacios, y es la misma
@@ -183,7 +352,11 @@ export const pagosService = {
               inscripcion_id: insc.id,
               dia_semana: insc.horarios_clases.dia_semana,
               coordinador_id: insc.horarios_clases.coordinador_id,
-              fecha_inicio: insc.fecha_inscripcion,
+              fecha_inicio: fechaInicioClases,
+              // 🤝 BL-010: ya tenemos la fila; sin esto la detección de choque
+              // con recuperaciones tendría que reconsultarla.
+              alumno_id: insc.alumno_id,
+              hora_inicio: insc.horarios_clases.hora_inicio,
             });
             continue;
           }
@@ -194,12 +367,27 @@ export const pagosService = {
             dia_semana: insc.horarios_clases.dia_semana,
             usuario_admin_id: Number.parseInt(usuario_admin_id),
             coordinador_id: insc.horarios_clases.coordinador_id,
-            fecha_inicio: insc.fecha_inscripcion,
+            fecha_inicio: fechaInicioClases,
             // 🚩 BL-001: ya tenemos la fila, así que le ahorramos la consulta a
             // la guardia de tipo de generarClasesFuturas.
             tipo_inscripcion: insc.tipo_inscripcion,
+            // 🤝 BL-010: idem para la detección de choques (409 si choca; ya
+            // pre-validado arriba, esto es la red de seguridad).
+            alumno_id: insc.alumno_id,
+            hora_inicio: insc.horarios_clases.hora_inicio,
           });
         }
+      }
+
+      // 🆕 BL-006: si el admin mandó fecha pero ninguna inscripción estaba
+      // POR_VALIDAR (caso típico: segundo abono parcial de un alumno que ya
+      // está ACTIVO y con clases generadas), NO se lanza. El front puede mandar
+      // el campo siempre y un reintento no debe romperse; el ciclo ya arrancó y
+      // moverlo a esta altura descuadraría las asistencias ya creadas.
+      if (nuevoInicio && inscripcionesConFechaAplicada === 0) {
+        console.warn(
+          `⚠️ BL-006: el pago ${pago_id} trajo fecha_inicio_ciclo pero ninguna inscripción de la cuenta ${pago.cuenta_id} estaba POR_VALIDAR. La fecha no se aplicó.`
+        );
       }
     } else if (!esAprobado) {
       // ❌ Lógica de rechazo

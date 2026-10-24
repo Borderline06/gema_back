@@ -18,6 +18,8 @@ router.use(authorize('Administrador'));
 router.get('/balance', movimientosFinancierosController.obtenerResumenBalance);
 router.get('/resumen', movimientosFinancierosController.obtenerResumen);
 router.get('/resumen-anual', movimientosFinancierosController.obtenerResumenAnual);
+// Merch vs Matrícula del mes (antes de '/:id' para que no lo capture).
+router.get('/desglose-ingresos', movimientosFinancierosController.obtenerDesgloseIngresos);
 // CRUD estándar
 router.get('/', movimientosFinancierosController.listar);
 router.get('/:id', movimientosFinancierosController.obtenerPorId);
