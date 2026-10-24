@@ -765,6 +765,32 @@ test('flujo físico completo: RESERVADO -> POR_ENTREGAR -> LISTO_PARA_RECOJO -> 
   assert.equal(item.gestionado_por, 98);
 });
 
+test('regresión: comprar 1 unidad deja 1 fila; pagar y entregar solo cambian su estado (no duplican)', async () => {
+  const db = crearDb({ productos });
+  const { cuenta_id } = await merchService.crearOrden({ alumno_id: 7, sede_recojo_id: 1, merch_ids: [1] }, db);
+  assert.equal(db.estado.items.length, 1);
+  const [item] = db.estado.items;
+
+  await merchService.procesarPagoValidado(db, {
+    cuentaId: cuenta_id, pagoId: 1, esAprobado: true, esPagoCompleto: true, nuevoEstadoDeuda: 'PAGADA',
+  });
+  assert.equal(db.estado.items.length, 1);
+  assert.equal(item.estado_item, 'POR_ENTREGAR');
+
+  await merchService.marcarEntregado(item.id, 98, db);
+  assert.equal(db.estado.items.length, 1);
+  assert.equal(item.estado_item, 'ENTREGADO');
+  // Stock descontado una sola vez (al reservar), no al pagar ni al entregar.
+  assert.equal(db.estado.merch.find((m) => m.id === 1).stock, 9);
+
+  // En la respuesta el ítem aparece en `entregado` y en su alias `posee` (mismo id):
+  // quien aplane los grupos debe deduplicar por id, es 1 unidad y no 2.
+  const { agruparColeccion } = await import('../src/features/merch/logic/merch.logic.js');
+  const g = agruparColeccion(db.estado.items);
+  assert.deepEqual(g.entregado.map((i) => i.id), [item.id]);
+  assert.deepEqual(g.posee.map((i) => i.id), [item.id]);
+});
+
 test('"listo para recojo" avisa al alumno con el producto y la sede; una sola vez', async () => {
   const db = crearDb({ productos });
   await ordenPagada(db, [1]);
