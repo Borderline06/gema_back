@@ -4,6 +4,14 @@ import { aCentimos, aMonto, redondear2 } from '../../../shared/utils/dinero.util
 export const ESTADO_MERCH = { ACTIVO: 'ACTIVO', INACTIVO: 'INACTIVO' };
 
 /**
+ * Código estable (viaja en `details.code`) cuando un producto pedido ya no se puede vender:
+ * se agotó, se desactivó o se eliminó. El front lo usa para ofrecer al alumno seguir solo
+ * con su matrícula; el texto del mensaje puede cambiar, este código no.
+ */
+export const CODIGO_MERCH_AGOTADO = 'MERCH_STOCK_AGOTADO';
+const DETALLE_MERCH_AGOTADO = { code: CODIGO_MERCH_AGOTADO };
+
+/**
  * Ciclo de un ítem:
  *   RESERVADO (sin pagar) -> POR_ENTREGAR (pagado) -> LISTO_PARA_RECOJO (en la sede) -> ENTREGADO
  * Aparte: PERDIDO y DEVUELTO. POSEE es legacy (equivale a ENTREGADO): se lee, ya no se escribe.
@@ -147,15 +155,16 @@ export function construirLineas(pedido, catalogo) {
   const lineas = pedido.map(({ merch_id, cantidad }) => {
     const producto = porId.get(merch_id);
     if (!producto) {
-      throw new ApiError(`El producto de merch ${merch_id} no existe.`, 404);
+      throw new ApiError(`El producto de merch ${merch_id} no existe.`, 404, DETALLE_MERCH_AGOTADO);
     }
     if (producto.estado !== ESTADO_MERCH.ACTIVO) {
-      throw new ApiError(`⛔ "${producto.nombre}" no está disponible.`, 409);
+      throw new ApiError(`⛔ "${producto.nombre}" no está disponible.`, 409, DETALLE_MERCH_AGOTADO);
     }
     if (producto.stock < cantidad) {
       throw new ApiError(
         `⛔ Stock insuficiente de "${producto.nombre}": quedan ${producto.stock}, se pidieron ${cantidad}.`,
-        409
+        409,
+        DETALLE_MERCH_AGOTADO
       );
     }
 

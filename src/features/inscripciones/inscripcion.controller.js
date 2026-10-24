@@ -5,6 +5,7 @@ import { catchAsync } from '../../shared/utils/catchAsync.util.js';
 import { ajusteFechaService } from './ajuste-fecha.service.js';
 import { renovacionHistoricaService } from './renovacion-historica.service.js';
 import { ApiError } from '../../shared/utils/error.util.js';
+import { CODIGO_MERCH_AGOTADO } from '../merch/logic/merch.logic.js';
 // BL-004: valida alumnoId y que un Alumno solo opere sobre sí mismo.
 const verificarAlumnoRenovacion = (req) => {
   const { alumnoId } = req.params;
@@ -34,6 +35,18 @@ export const inscripcionController = {
       });
 
     } catch (error) {
+      // 0. 🛍️ El merch pedido se agotó/desactivó entre que el alumno lo eligió y confirmó.
+      // La transacción ya revirtió la inscripción completa; `code` (llave nueva) le
+      // permite al front ofrecer continuar solo con la matrícula. Va antes que el resto
+      // porque el 404 "no existe" de un producto borrado no es un horario inexistente.
+      if (error.details?.code === CODIGO_MERCH_AGOTADO) {
+        return res.status(409).json({
+          status: 'error',
+          message: error.message,
+          code: CODIGO_MERCH_AGOTADO,
+        });
+      }
+
       // 1. Error de duplicado de Prisma (P2002)
       if (error.code === 'P2002') {
         return res.status(400).json({
@@ -301,7 +314,8 @@ export const inscripcionController = {
       const resultado = await inscripcionService.inscribirIndividual(req.body);
       return apiResponse.success(res, { data: resultado, message: resultado.mensaje });
     } catch (e) {
-      return apiResponse.error(res, { message: e.message || 'Error Interno del Servidor', status: e.statusCode || 500 });
+      // `details` (p. ej. { code: 'MERCH_STOCK_AGOTADO' }) es aditivo: message y status no cambian.
+      return apiResponse.error(res, { message: e.message || 'Error Interno del Servidor', status: e.statusCode || 500, details: e.details });
     }
   },
 

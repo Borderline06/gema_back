@@ -10,6 +10,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 const TZ_LIMA = 'America/Lima';
 import {
+  CODIGO_MERCH_AGOTADO,
   CONCEPTO_INGRESO,
   calcularSplitIngresos,
   ESTADOS_PAGADOS,
@@ -130,7 +131,7 @@ const validarYDescontarStock = async (tx, merchIds) => {
       data: { stock: { decrement: linea.cantidad }, actualizado_en: new Date() },
     });
     if (count === 0) {
-      throw new ApiError(`⛔ Stock insuficiente de "${linea.nombre}".`, 409);
+      throw new ApiError(`⛔ Stock insuficiente de "${linea.nombre}".`, 409, { code: CODIGO_MERCH_AGOTADO });
     }
   }
 

@@ -1447,7 +1447,9 @@ export const inscripcionService = {
     // precio del catálogo. Ahora el precio sale siempre de
     // catalogo_conceptos.precio_base; `omitirNotificacion` reemplaza el doble
     // uso que tenía montoDividido como flag del flujo admin.
-    const { alumno_id, idHorario, fecha_inicio_electiva, omitirNotificacion } = data;
+    // 🛍️ merch_ids / sede_recojo_id son OPCIONALES (undefined, null o [] = sin merch);
+    // el cobro combinado reutiliza el mismo motor de la matrícula mensual.
+    const { alumno_id, idHorario, fecha_inicio_electiva, omitirNotificacion, merch_ids, sede_recojo_id } = data;
 
     const ejecutar = async (tx) => {
       await Validators.validarMuroDeDeuda(tx, alumno_id);
@@ -1599,12 +1601,24 @@ export const inscripcionService = {
       //   }
       // });
 
+      // 🛍️ Merch opcional: suma el merch a la MISMA cuenta y rebalancea el puente.
+      // Sin merch_ids no toca nada (mismo monto, mismo detalle que antes).
+      const { montoFinal, merch: merchCombo } = await merchService.cerrarCuentaConMerch(tx, {
+        alumno_id,
+        cuenta_id: nuevaCuenta.id,
+        detalle_base: detalleCobro.join(' | '),
+        monto_matricula: totalCobrar,
+        hubo_beneficios: false,
+        merch_ids,
+        sede_recojo_id,
+      });
+
       if (!omitirNotificacion) {
         await tx.notificaciones.create({
           data: {
             alumno_id: parseInt(alumno_id),
             titulo: '✅ Inscripción por Clase Única Generada',
-            mensaje: `Se ha reservado tu cupo. Total: S/ ${totalCobrar.toFixed(2)}.`,
+            mensaje: `Se ha reservado tu cupo. Total: S/ ${montoFinal.toFixed(2)}.`,
             tipo: 'SUCCESS',
             categoria: 'SISTEMA'
           }
@@ -1613,8 +1627,12 @@ export const inscripcionService = {
 
       return {
         mensaje: 'Inscripción procesada exitosamente.',
-        total_a_pagar: totalCobrar,
-        inscripcion: nuevaInscripcion
+        total_a_pagar: montoFinal,
+        inscripcion: nuevaInscripcion,
+        // Llaves nuevas (aditivas): solo informan el merch del cobro combinado.
+        cuenta_id: nuevaCuenta.id,
+        total_merch: merchCombo.total,
+        merch: merchCombo.lineas
       };
     }
 
