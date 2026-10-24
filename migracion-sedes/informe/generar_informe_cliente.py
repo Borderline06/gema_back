@@ -85,7 +85,7 @@ afectan = [g for g in grupos if g["afecta"]]
 S += [P("Separacion de sedes hacia el nuevo sistema", titulo), Spacer(1, 6),
       P("Decisiones pendientes y listas para validar con el cliente", sub), Spacer(1, 18),
       P(f"Generado el {date.today():%d/%m/%Y}. Datos de prueba: dump del 03/10/2026. "
-        "Las cifras se recalcularan con el dump definitivo del corte (aprox. 1 de noviembre).", sub), Spacer(1, 26)]
+        "Las cifras se recalcularan con los datos vigentes al momento de la migracion.", sub), Spacer(1, 26)]
 S.append(tabla([cab(["Sedes que migran al nuevo sistema"], base), [P("<br/>".join(sedes))]], [W]))
 S += [Spacer(1, 14), P("<b>Que necesitamos del cliente</b>", h2),
       tabla([cab(["#", "Tema", "Que se pide"]),
@@ -210,11 +210,10 @@ S += [P("5. Campo usuario_id de notificaciones (caso 13)", h1),
         "para avisos a administradores). En los datos de prueba, usuario_id esta vacio en 4.966 de 4.967 filas. La pregunta es si se puede eliminar el campo."),
       P("Conclusion", h2),
       P("<b>Se puede eliminar sin perder datos, pero no es un cambio gratuito: hay codigo que lo usa.</b> Recomendamos no hacerlo dentro de la migracion de datos "
-        "sino como un cambio aparte, despues del corte."),
+        "sino como un cambio aparte, en otra rama."),
       P("Datos", h2),
       tabla([cab(["Dato", "Resultado"]),
-             [P("Filas que usan usuario_id"), P("1 de 4.967: el aviso 'Pase Generado' del 27/05/2026, del administrador Eddy")],
-             [P("Filas con ese campo en el nuevo sistema"), P("0 si Eddy no se conserva (seccion 1, opcion B); 1 si se conserva")]],
+             [P("Filas que usan usuario_id"), P("1 de 4.967: el aviso 'Pase Generado' del 27/05/2026, del administrador Eddy")]],
             [55 * mm, W - 55 * mm]),
       P("Que habria que cambiar", h2),
       tabla([cab(["Donde", "Cambio"]),
