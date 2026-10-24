@@ -1,7 +1,24 @@
 import { PrismaClient } from '@prisma/client';
 import { ApiError } from '../../shared/utils/error.util.js';
+import { merchService } from '../merch/merch.service.js';
+import { armarDesgloseIngresos } from './desglose-ingresos.logic.js';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 const prisma = new PrismaClient();
+
+// Las filas INGRESO_MERCH / INGRESO_MATRICULA las genera la validación de un pago:
+// editarlas o borrarlas a mano las desalinearía del pago que las originó.
+const rechazarSiEsAutomatico = async (id) => {
+    const mov = await prisma.movimientos_financieros.findUnique({
+        where: { id: parseInt(id) },
+        select: { pago_id: true }
+    });
+    if (mov?.pago_id) {
+        throw new ApiError(
+            `Este movimiento lo generó el pago #${mov.pago_id} y no se puede modificar desde caja.`,
+            409
+        );
+    }
+};
 
 const getMonthLocal = (fecha) => {
     const date = new Date(fecha)
@@ -84,6 +101,7 @@ export const movimientosFinancierosService = {
         const mesHoy = getMonthLocal(new Date());
         const mesData = getMonthLocal(data.fecha_movimiento);
         if (mesData > mesHoy) throw new ApiError('Debe actualizar el ingreso/egreso en el mes actual.', 400);
+        await rechazarSiEsAutomatico(id);
         return await prisma.movimientos_financieros.update({
             where: { id: parseInt(id) },
             data: {
@@ -96,6 +114,60 @@ export const movimientosFinancierosService = {
                 sede_id: data.sede_id,
                 fecha_movimiento: data.fecha_movimiento,
             }
+        });
+    },
+
+    /**
+     * Desglose "Merch vs Matrícula" de lo COBRADO en un mes (por fecha de pago), para auditoría.
+     *
+     * Es un endpoint aparte (y no una llave más de `obtenerResumenMensual`) porque ese resumen es
+     * un mapa indexado por sede: cualquier llave extra se leería como una sede y rompería la
+     * tabla y el Excel.
+     *
+     *   - merch      = suma de las filas INGRESO_MERCH del mes (ventas de taquilla, órdenes de
+     *                  alumno y la parte de merch de los pagos MIXTO).
+     *   - matricula  = todo lo cobrado en el mes menos el merch. Las filas INGRESO_MATRICULA solo
+     *                  existen en pagos MIXTO, así que no sirven como total de matrícula.
+     *   - movimientos = las filas automáticas del mes (concepto, monto, alumno y pago de origen)
+     *                  para poder cuadrar cada sol contra su pago.
+     */
+    obtenerDesgloseIngresos: async (mes, anio) => {
+        const mesInt = parseInt(mes);
+        const anioInt = parseInt(anio);
+        if (!Number.isInteger(mesInt) || mesInt < 1 || mesInt > 12 || !Number.isInteger(anioInt)) {
+            throw new ApiError("Parámetros 'mes' (1-12) y 'anio' inválidos", 400);
+        }
+        // Mismo rango que obtenerResumenMensual.
+        const fechaInicio = new Date(anioInt, mesInt - 1, 1);
+        const fechaFin = new Date(anioInt, mesInt, 0, 23, 59, 59);
+
+        const [cobrado, filas] = await Promise.all([
+            prisma.pagos.aggregate({
+                _sum: { monto_pagado: true },
+                where: { estado_validacion: 'APROBADO', fecha_pago: { gte: fechaInicio, lte: fechaFin } }
+            }),
+            prisma.movimientos_financieros.findMany({
+                where: { pago_id: { not: null }, fecha_movimiento: { gte: fechaInicio, lte: fechaFin } },
+                orderBy: [{ fecha_movimiento: 'asc' }, { id: 'asc' }],
+                include: {
+                    pagos: {
+                        select: {
+                            id: true,
+                            tipo_transaccion: true,
+                            cuentas_por_cobrar: {
+                                select: { alumnos: { select: { usuarios: { select: { nombres: true, apellidos: true } } } } }
+                            }
+                        }
+                    }
+                }
+            })
+        ]);
+
+        return armarDesgloseIngresos({
+            mes: mesInt,
+            anio: anioInt,
+            totalCobrado: cobrado._sum.monto_pagado,
+            filas
         });
     },
 
@@ -204,7 +276,9 @@ export const movimientosFinancierosService = {
         // Sin cambios: usan fecha_movimiento, no dependen de ciclos.
         const movimientos = await prisma.movimientos_financieros.findMany({
             where: {
-                fecha_movimiento: { gte: fechaInicio, lte: fechaFin }
+                fecha_movimiento: { gte: fechaInicio, lte: fechaFin },
+                // Las filas con pago_id (INGRESO_MERCH/INGRESO_MATRICULA) ya viajan en los pagos de arriba.
+                pago_id: null
             },
             include: { sedes: true }
         });
@@ -239,6 +313,7 @@ export const movimientosFinancierosService = {
 
     // Eliminar un movimiento
     eliminar: async (id) => {
+        await rechazarSiEsAutomatico(id);
         try {
             return await prisma.movimientos_financieros.delete({
                 where: { id: parseInt(id) }
@@ -283,20 +358,34 @@ export const movimientosFinancierosService = {
         // =========================================================
         const ingresosManualesAgg = await prisma.movimientos_financieros.aggregate({
             _sum: { monto: true },
-            where: { tipo_movimiento: 'INGRESO' }
+            // pago_id: null -> solo manuales. Las filas automáticas del split de pagos ya están
+            // contadas en los ingresos automáticos / merch suelto de arriba.
+            where: { tipo_movimiento: 'INGRESO', pago_id: null }
         });
 
         const egresosAgg = await prisma.movimientos_financieros.aggregate({
             _sum: { monto: true },
-            where: { tipo_movimiento: 'EGRESO' }
+            where: { tipo_movimiento: 'EGRESO', pago_id: null }
         });
 
         const totalIngresosManuales = Number(ingresosManualesAgg._sum.monto || 0);
         const totalEgresos = Number(egresosAgg._sum.monto || 0);
-        const totalIngresos = totalIngresosAutomaticos + totalIngresosManuales;
+
+        // =========================================================
+        // 3. MERCH: las ventas sueltas (tipo_transaccion = 'MERCH') no tienen
+        // link de matrícula, así que el filtro del punto 1 las deja fuera. Se
+        // suman aparte para que cuenten en las ganancias totales. El merch
+        // vendido dentro de una matrícula ya viaja en ingresosAutomaticos.
+        // =========================================================
+        const totalMerchSuelto = await merchService.sumarPagosMerchSueltos(prisma);
+        const totalIngresos = totalIngresosAutomaticos + totalIngresosManuales + totalMerchSuelto;
+        const totalMerch = await merchService.sumarIngresosMerch(prisma);
 
         return {
             ingresos: totalIngresos,
+            // 🛍️ NUEVO (aditivo): métricas de merch aisladas.
+            ingresosMerch: totalMerch,          // todo el merch (suelto + dentro de matrículas)
+            ingresosMerchSuelto: totalMerchSuelto, // la parte que se sumó arriba
             // 🚩 NUEVO: desglose para que el frontend (o tú mismo debuggeando)
             // pueda ver de dónde viene cada sol, sin tener que adivinar.
             ingresosAutomaticos: totalIngresosAutomaticos,
@@ -334,6 +423,19 @@ export const movimientosFinancierosService = {
             ORDER BY mes;
         `;
  
+        // Ventas sueltas de merch (sin link de matrícula), agrupadas por mes de pago
+        const filasMerch = await prisma.$queryRaw`
+            SELECT
+                EXTRACT(MONTH FROM p.fecha_pago)::int AS mes,
+                SUM(p.monto_pagado) AS total
+            FROM pagos p
+            WHERE p.estado_validacion = 'APROBADO'
+              AND p.tipo_transaccion = 'MERCH'
+              AND p.fecha_pago BETWEEN ${fechaInicio} AND ${fechaFin}
+            GROUP BY EXTRACT(MONTH FROM p.fecha_pago)
+            ORDER BY mes;
+        `;
+
         // Movimientos manuales (ingreso/egreso), agrupados por mes y tipo
         const filasMovimientos = await prisma.$queryRaw`
             SELECT
@@ -342,6 +444,7 @@ export const movimientosFinancierosService = {
                 SUM(mf.monto) AS total
             FROM movimientos_financieros mf
             WHERE mf.fecha_movimiento BETWEEN ${fechaInicio} AND ${fechaFin}
+              AND mf.pago_id IS NULL
             GROUP BY EXTRACT(MONTH FROM mf.fecha_movimiento), mf.tipo_movimiento
             ORDER BY mes;
         `;
@@ -354,7 +457,8 @@ export const movimientosFinancierosService = {
             ingresosPagos: 0,      // ingresos automáticos (pagos de alumnos)
             ingresosManuales: 0,   // movimientos manuales tipo INGRESO
             egresos: 0,            // movimientos manuales tipo EGRESO
-            totalIngresos: 0,      // ingresosPagos + ingresosManuales
+            ingresosMerch: 0,      // 🛍️ ventas sueltas de merch (tipo_transaccion 'MERCH')
+            totalIngresos: 0,      // ingresosPagos + ingresosManuales + ingresosMerch
             balance: 0             // totalIngresos - egresos
         }));
  
@@ -362,6 +466,10 @@ export const movimientosFinancierosService = {
             meses[Number(fila.mes) - 1].ingresosPagos = Number(fila.total);
         });
  
+        filasMerch.forEach(fila => {
+            meses[Number(fila.mes) - 1].ingresosMerch = Number(fila.total);
+        });
+
         filasMovimientos.forEach(fila => {
             const idx = Number(fila.mes) - 1;
             if (fila.tipo === 'INGRESO') meses[idx].ingresosManuales = Number(fila.total);
@@ -369,7 +477,7 @@ export const movimientosFinancierosService = {
         });
  
         meses.forEach(m => {
-            m.totalIngresos = m.ingresosPagos + m.ingresosManuales;
+            m.totalIngresos = m.ingresosPagos + m.ingresosManuales + m.ingresosMerch;
             m.balance = m.totalIngresos - m.egresos;
         });
  

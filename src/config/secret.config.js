@@ -42,9 +42,15 @@ export const COOKIE_PARTITIONED = parseBooleanEnv(
 export const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 // ============================================
+// BRANDING (nombre visible de la empresa)
+// ============================================
+export const COMPANY_NAME = process.env.COMPANY_NAME || 'G+';
+
+// ============================================
 // BREVO (EMAIL) CONFIGURATION
 // ============================================
 export const BREVO_API_KEY = process.env.BREVO_API_KEY;
+export const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || COMPANY_NAME;
 export const BREVO_SENDER_EMAIL = process.env.BREVO_SENDER_EMAIL || 'no-reply@academiagema.com';
 export const BREVO_TIMEOUT_MS = Number.parseInt(process.env.BREVO_TIMEOUT_MS) || 8000;
 

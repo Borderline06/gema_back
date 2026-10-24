@@ -2,7 +2,7 @@ import { prisma } from '../../../config/database.config.js';
 import { twilioProvider } from '../../../shared/services/twilio.whatsapp.service.js';
 import { emailService } from '../../../shared/services/brevo.email.service.js';
 import { logger } from '../../../shared/utils/logger.util.js';
-import { TWILIO_TEMPLATE_CUMPLEANOS_SID } from '../../../config/secret.config.js';
+import { TWILIO_TEMPLATE_CUMPLEANOS_SID, COMPANY_NAME } from '../../../config/secret.config.js';
 
 // 🔥 IMPORTAMOS DAYJS PARA HORA EXACTA DE PERÚ 🔥
 import dayjs from 'dayjs';
@@ -69,7 +69,7 @@ class CumpleanosService {
             wpEnviado = wpResultado.success;
           } else {
             // Plan de Respaldo por si falla el código de Twilio
-            const mensaje = `¡Hola ${usuario.nombres}! 🎉 En Club GEMA celebramos contigo este día especial 🎈🎂🥳. Que sea un año lleno de logros y grandes historias para disfrutar. 👉 ¡Nos vemos en cancha para seguir creciendo juntos! 💪✨`;
+            const mensaje = `¡Hola ${usuario.nombres}! 🎉 En ${COMPANY_NAME} celebramos contigo este día especial 🎈🎂🥳. Que sea un año lleno de logros y grandes historias para disfrutar. 👉 ¡Nos vemos en cancha para seguir creciendo juntos! 💪✨`;
             const wpResultado = await twilioProvider.sendWhatsAppMessage(usuario.telefono_personal, mensaje);
             wpEnviado = wpResultado.success;
           }

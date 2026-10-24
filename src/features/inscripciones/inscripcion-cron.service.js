@@ -4,6 +4,7 @@ import { notificacionesService } from '../notificaciones/notificaciones.service.
 import { twilioProvider } from '../../shared/services/twilio.whatsapp.service.js';
 import { emailService } from '../../shared/services/brevo.email.service.js';
 import { inscripcionService } from './inscripcion.service.js';
+import { merchService } from '../merch/merch.service.js';
 import { DIAS_CICLO, aFechaUTC, diaLimaAFechaUTC } from '../../shared/utils/ciclo.util.js';
 // 🎯 BL-001
 import { TIPO_INSCRIPCION, esIndividual, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
@@ -91,7 +92,8 @@ class InscripcionCronService {
                 where: { cuenta_id: cuentaId }
               });
 
-              // PASO C: Borrar la CUENTA
+              // PASO C: Borrar la CUENTA (el merch reservado devuelve su stock)
+              await merchService.liberarMerchDeCuenta(tx, cuentaId);
               await tx.cuentas_por_cobrar.delete({
                 where: { id: cuentaId }
               });

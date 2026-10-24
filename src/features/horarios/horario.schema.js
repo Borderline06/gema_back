@@ -18,6 +18,21 @@ const nullableCoercePositiveInt = (label) =>
 
 const horaRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
+// 🎯 BL-003: tope del rango consultable en /disponibilidad (evita barridos).
+export const MAX_DIAS_DISPONIBILIDAD = 92;
+const MS_POR_DIA = 86400000;
+
+// 'YYYY-MM-DD' real. El round-trip rechaza fechas imposibles ('2026-02-30'),
+// que `new Date` desbordaría en silencio al mes siguiente.
+const fechaISO = (label) =>
+  z
+    .string({ required_error: `${label} es obligatorio` })
+    .regex(/^\d{4}-\d{2}-\d{2}$/, `${label} debe tener formato YYYY-MM-DD`)
+    .refine((v) => {
+      const d = new Date(`${v}T00:00:00.000Z`);
+      return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+    }, `${label} no es una fecha válida`);
+
 export const horarioSchema = {
   createHorarioSchema: z.object({
     cancha_id: coercePositiveInt('ID de cancha'),
@@ -53,6 +68,30 @@ export const horarioSchema = {
     })
     .refine((data) => Object.keys(data).length > 0, {
       message: 'Debe proporcionar al menos un campo para actualizar',
+    }),
+
+  disponibilidadQuerySchema: z
+    .object({
+      desde: fechaISO('desde'),
+      hasta: fechaISO('hasta'),
+    })
+    .superRefine((q, ctx) => {
+      // Solo se compara si ambas pasaron su validación individual.
+      const ini = new Date(`${q.desde}T00:00:00.000Z`).getTime();
+      const fin = new Date(`${q.hasta}T00:00:00.000Z`).getTime();
+      if (fin < ini) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['hasta'],
+          message: 'hasta debe ser igual o posterior a desde',
+        });
+      } else if ((fin - ini) / MS_POR_DIA + 1 > MAX_DIAS_DISPONIBILIDAD) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['hasta'],
+          message: `El rango no puede superar ${MAX_DIAS_DISPONIBILIDAD} días`,
+        });
+      }
     }),
 
   idParamSchema: z.object({

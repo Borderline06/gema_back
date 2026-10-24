@@ -252,6 +252,68 @@ export const alumnoService = {
     });
   },
 
+  // ==================================================================
+  // 🆕 BL-007: upsert del CONTACTO DE EMERGENCIA (el principal del alumno).
+  //
+  // El formulario del frontend trata el contacto de emergencia como uno solo,
+  // pero alumnos_contactos es 1:N con bandera es_principal. Este método resuelve
+  // las dos operaciones del formulario en una: actualiza el principal si existe
+  // y lo crea si el alumno todavía no tiene ninguno.
+  //
+  // ⚠️ No hay índice único sobre (alumno_id, es_principal) en la BD, así que la
+  // unicidad del principal se garantiza a mano con updateMany, igual que ya
+  // hacen crearContacto y actualizarContacto.
+  // ==================================================================
+  actualizarContactoEmergencia: async (alumnoId, datos) => {
+    return await prisma.$transaction(async (tx) => {
+      // Mismo blindaje que crearContacto: nada de contactos huérfanos.
+      const alumno = await tx.alumnos.findUnique({
+        where: { usuario_id: alumnoId },
+        select: { usuario_id: true },
+      });
+      if (!alumno) throw new ApiError('Alumno no encontrado', 404);
+
+      const principal = await tx.alumnos_contactos.findFirst({
+        where: { alumno_id: alumnoId, es_principal: true },
+        orderBy: { id: 'asc' },
+      });
+
+      if (!principal) {
+        // Sin principal: limpiamos cualquier residuo (datos sucios con varios
+        // marcados) y creamos el contacto como principal.
+        await tx.alumnos_contactos.updateMany({
+          where: { alumno_id: alumnoId, es_principal: true },
+          data: { es_principal: false },
+        });
+
+        return await tx.alumnos_contactos.create({
+          data: {
+            alumno_id: alumnoId,
+            nombre_completo: datos.nombre_completo,
+            relacion: datos.relacion,
+            telefono: datos.telefono,
+            es_principal: true,
+          },
+        });
+      }
+
+      // Hay principal: nos aseguramos de que sea el ÚNICO y lo actualizamos.
+      await tx.alumnos_contactos.updateMany({
+        where: { alumno_id: alumnoId, es_principal: true, id: { not: principal.id } },
+        data: { es_principal: false },
+      });
+
+      return await tx.alumnos_contactos.update({
+        where: { id: principal.id },
+        data: {
+          nombre_completo: datos.nombre_completo,
+          relacion: datos.relacion,
+          telefono: datos.telefono,
+        },
+      });
+    });
+  },
+
   // 🗑️ Elimina un contacto — SOLO si pertenece al alumno de la sesión
   eliminarContacto: async (usuarioId, contactoId) => {
     const contacto = await prisma.alumnos_contactos.findUnique({

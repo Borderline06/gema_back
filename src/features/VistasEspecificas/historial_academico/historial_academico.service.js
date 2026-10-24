@@ -491,7 +491,7 @@ export const historialAcademicoService = {
   },
 
   // =================================================================
-  // 📤 BL-013: REPORTE EXPORTABLE DE ALUMNOS — 7 columnas exactas.
+  // 📤 BL-013: REPORTE EXPORTABLE DE ALUMNOS — 10 columnas exactas.
   // Las llaves del objeto SON los nombres de columna del Excel: el
   // frontend las genera con Object.keys (mismo contrato que el
   // Reporte Maestro). No agregar llaves técnicas como "id".
@@ -632,6 +632,36 @@ export const historialAcademicoService = {
           ? formatFechaEs(new Date(Math.max(...cortesVigentes)))
           : 'N/A';
 
+        // --- Edad: años cumplidos hoy (hora de Lima) ---
+        // fecha_nacimiento es @db.Date ⇒ se lee en UTC, igual que formatFechaEs.
+        let edad = 'N/A';
+        if (user.fecha_nacimiento) {
+          const nac = new Date(user.fecha_nacimiento);
+          const ahoraLima = dayjs().tz(TZ_LIMA);
+          let anios = ahoraLima.year() - nac.getUTCFullYear();
+          const mesDif = (ahoraLima.month() + 1) - (nac.getUTCMonth() + 1);
+          if (mesDif < 0 || (mesDif === 0 && ahoraLima.date() < nac.getUTCDate())) anios -= 1;
+          if (anios >= 0) edad = anios;
+        }
+
+        // --- Estado: misma prioridad que estadoVisual de obtenerResumenTablaAlumnos ---
+        // ACTIVO si tiene alguna inscripción activa; si no, el estado de la más
+        // reciente (inscripciones viene ordenado por fecha_inscripcion desc).
+        let estado = 'SIN INSCRIPCIÓN';
+        if (activasGlobales.length > 0) estado = 'ACTIVO';
+        else if (inscripciones.length > 0) estado = inscripciones[0].estado || 'SIN INSCRIPCIÓN';
+
+        // --- Sede de origen: sede de la inscripción más antigua ---
+        // alumnos no tiene sede propia. creado_en nunca se pisa (a diferencia de
+        // fecha_inscripcion), así que ordena el alta real; sin creado_en, la
+        // última de la lista (la más antigua por fecha_inscripcion).
+        const masAntigua = inscripciones.some((i) => i.creado_en)
+          ? [...inscripciones]
+              .filter((i) => i.creado_en)
+              .sort((a, b) => new Date(a.creado_en) - new Date(b.creado_en))[0]
+          : inscripciones[inscripciones.length - 1];
+        const sedeOrigen = masAntigua?.horarios_clases?.canchas?.sedes?.nombre || 'N/A';
+
         return {
           'Nombre': `${user.nombres} ${user.apellidos}`.trim(),
           'DNI': user.numero_documento || 'N/A',
@@ -640,6 +670,10 @@ export const historialAcademicoService = {
           'Fecha de corte': fechaCorte,
           'Sede': sedes.length > 0 ? sedes.join(', ') : 'N/A',
           'Nivel': niveles.length > 0 ? niveles.join(', ') : 'N/A',
+          // 🎯 BL-013: columnas 8-10, añadidas al final (las 7 anteriores no se mueven).
+          'Edad': edad,
+          'Estado': estado,
+          'Sede de origen': sedeOrigen,
         };
       });
     } catch (error) {

@@ -2,6 +2,21 @@ import { inscripcionService } from './inscripcion.service.js';
 import { apiResponse } from '../../shared/utils/response.util.js';
 import { inscripcionReporteService } from './inscripcion-reporte.service.js';
 import { catchAsync } from '../../shared/utils/catchAsync.util.js';
+import { ajusteFechaService } from './ajuste-fecha.service.js';
+import { renovacionHistoricaService } from './renovacion-historica.service.js';
+import { ApiError } from '../../shared/utils/error.util.js';
+// BL-004: valida alumnoId y que un Alumno solo opere sobre sí mismo.
+const verificarAlumnoRenovacion = (req) => {
+  const { alumnoId } = req.params;
+  if (!alumnoId || !/^[0-9]+$/.test(String(alumnoId).trim())) {
+    throw new ApiError('El ID de alumno debe ser un entero válido', 400);
+  }
+  if (req.user?.rol_nombre === 'Alumno' && Number(alumnoId) !== req.user.id) {
+    throw new ApiError('No puedes operar sobre otro alumno.', 403);
+  }
+  return alumnoId;
+};
+
 
 
 export const inscripcionController = {
@@ -224,11 +239,14 @@ export const inscripcionController = {
       })
     } catch (e) {
       console.error(e)
-      return apiResponse.error(
-        res,
-        e.message || 'Error interno',
-        e.statusCode || 500
-      )
+      // 🤝 BL-010: se reenvía `details` (choque con recuperación → 409 con
+      // fecha/hora). `details` es undefined en el resto de errores, así que su
+      // JSON no cambia.
+      return apiResponse.error(res, {
+        message: e.message || 'Error interno',
+        status: e.statusCode || 500,
+        details: e.details,
+      })
     }
   },
   separarYFinalizar: async (req, res) => {
@@ -343,6 +361,58 @@ export const inscripcionController = {
       next(error);
     }
   },
+  // 🆕 BL-004: último plan del alumno para pre-llenar la reinscripción.
+  getUltimoPlan: async (req, res, next) => {
+    try {
+      const { alumnoId } = req.params;
+
+      // Regex de entero estricto en vez de parseInt (que aceptaría "12abc"),
+      // misma convención que parsearMesAnio y el validador de sede_id.
+      if (!alumnoId || !/^[0-9]+$/.test(String(alumnoId).trim())) {
+        return res.status(400).json({
+          success: false,
+          message: 'El ID de alumno debe ser un entero válido',
+        });
+      }
+
+      const ultimoPlan = await inscripcionService.obtenerUltimoPlanAlumno(alumnoId);
+
+      return res.status(200).json({
+        success: true,
+        data: ultimoPlan,
+        message: ultimoPlan.tiene_plan_previo
+          ? 'Último plan obtenido correctamente'
+          : 'El alumno no tiene un plan previo para reinscribir',
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  // BL-004: planes finalizados renovables (expediente histórico).
+  getPlanesHistoricos: async (req, res, next) => {
+    try {
+      const alumnoId = verificarAlumnoRenovacion(req);
+      const data = await renovacionHistoricaService.listarPlanesHistoricos(alumnoId);
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  // BL-004: renovar un paquete finalizado.
+  renovarHistorico: async (req, res, next) => {
+    try {
+      const alumnoId = verificarAlumnoRenovacion(req);
+      const { cuentaId } = req.params;
+      if (!/^[0-9]+$/.test(String(cuentaId).trim())) throw new ApiError('El ID de cuenta debe ser un entero válido', 400);
+      const data = await renovacionHistoricaService.renovar(alumnoId, cuentaId, req.body);
+      return res.status(201).json({ success: true, message: 'Renovación generada. Pendiente de pago.', data });
+    } catch (error) {
+      next(error);
+    }
+  },
+
   getReporteIndividualesExcel: catchAsync(async (req, res) => {
     // 1. Llamamos al servicio
     const dataReporte = await inscripcionReporteService.getReporteIndividuales();
@@ -353,6 +423,25 @@ export const inscripcionController = {
       message: 'Reporte generado con éxito',
       data: dataReporte
     });
-  })
+  }),
 
+
+  // BL-006: ajuste de fecha de inicio de un paquete pagado
+  getAjusteFecha: async (req, res) => {
+    try {
+      const data = await ajusteFechaService.obtenerEstado(req.params.cuentaId);
+      return apiResponse.success(res, { data, message: 'Estado del ajuste de fecha' });
+    } catch (e) {
+      return apiResponse.error(res, { message: e.message || 'Error Interno del Servidor', status: e.statusCode || 500 });
+    }
+  },
+
+  ajustarFechaPaquete: async (req, res) => {
+    try {
+      const data = await ajusteFechaService.ajustarFecha(req.params.cuentaId, req.body, req.user.id);
+      return apiResponse.success(res, { data, message: 'Fecha de inicio ajustada y clases regeneradas correctamente' });
+    } catch (e) {
+      return apiResponse.error(res, { message: e.message || 'Error Interno del Servidor', status: e.statusCode || 500 });
+    }
+  },
 };

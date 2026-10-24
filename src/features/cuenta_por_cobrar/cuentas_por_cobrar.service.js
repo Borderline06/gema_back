@@ -3,11 +3,15 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import crypto from 'crypto';
+import { merchService } from '../merch/merch.service.js';
 import { detectarRegimenAlumno } from '../inscripciones/logic/inscripcion.logic.js';
 import * as Validators from '../inscripciones/validators/inscripcion.validator.js';
 import { TZ_LIMA } from '../../shared/utils/ciclo.util.js';
 // 🎯 BL-001: una clase suelta no se renueva.
 import { TIPO_INSCRIPCION, whereTipoInscripcion } from '../../shared/utils/tipo-inscripcion.util.js';
+// 💰 BL-002: reparto de dinero en céntimos exactos y sincronización del puente.
+import { repartirMonto, redondear2 } from '../../shared/utils/dinero.util.js';
+import { sincronizarPuenteDeuda } from '../../shared/utils/deuda-puente.util.js';
 
 // 🔧 BL-011: este archivo importaba dayjs pelado, sin plugins, así que no podía
 // anclar las fechas de ciclo a Lima y el parseo caía en la hora local del server.
@@ -102,6 +106,17 @@ export const CuentasPorCobrarService = {
         }
       }
 
+      // 🌉 BL-002: si la cuenta ya tuviera links y los beneficios bajaron el
+      // monto, hay que re-equilibrar el puente. Es no-op cuando la cuenta se
+      // acaba de crear y todavía no tiene links, que es el caso habitual acá.
+      if (beneficiosEnCola.length > 0) {
+        const cuentaConDescuentos = await tx.cuentas_por_cobrar.findUnique({
+          where: { id: nuevaCuenta.id },
+          select: { monto_final: true },
+        });
+        await sincronizarPuenteDeuda(tx, nuevaCuenta.id, cuentaConDescuentos.monto_final);
+      }
+
       // Retornamos la cuenta final (ya sea con descuento o sin él)
       return await tx.cuentas_por_cobrar.findUnique({
         where: { id: nuevaCuenta.id },
@@ -152,7 +167,8 @@ export const CuentasPorCobrarService = {
     // PASO 3: Pagos
     await tx.pagos.deleteMany({ where: { cuenta_id: cuenta.id } });
 
-    // PASO 4: Borrado final
+    // PASO 4: Borrado final (el merch reservado devuelve su stock)
+    await merchService.liberarMerchDeCuenta(tx, cuenta.id);
     const resultado = await tx.cuentas_por_cobrar.delete({
       where: { id: cuenta.id },
     });
@@ -330,7 +346,15 @@ export const CuentasPorCobrarService = {
       where: { cantidad_clases_semanal: paqueteActual.length, activo: true, es_vigente: !esLegacy }
     });
 
-    const montoTotal = Number(conceptoPaquete.precio_base);
+    // 🛡️ BL-002: sin esta guarda, la línea siguiente reventaba con un
+    // `TypeError: Cannot read properties of undefined` en vez de decir qué
+    // faltaba. La variante generarRenovacionPaqueteValidado ya la tenía.
+    if (!conceptoPaquete) throw new Error(`⛔ No existe un plan para ${paqueteActual.length} clases en el catálogo.`);
+
+    // 💰 BL-002: el precio sale del catálogo, normalizado a 2 decimales.
+    // 🛍️ El merch es de pago único: el monto de la renovación es solo el plan, nunca
+    // arrastra ni suma el merch de la cuenta anterior (tests/merch-ingresos-imagenes.test.js).
+    const montoTotal = redondear2(conceptoPaquete.precio_base);
     const fechaOriginalParaRevertir = paqueteActual[0].fecha_inscripcion;
 
     const nuevaCuenta = await tx.cuentas_por_cobrar.create({
@@ -344,7 +368,9 @@ export const CuentasPorCobrarService = {
       }
     });
 
-    const montoPorSlot = montoTotal / paqueteActual.length;
+    // 💰 BL-002: antes `montoTotal / n` perdía el céntimo del residuo al
+    // redondear cada parte por separado en Decimal(10,2) (400/3 -> 399.99).
+    const partesPorSlot = repartirMonto(montoTotal, paqueteActual.length);
 
     // 🚩 NUEVO: cerramos el ciclo viejo ANTES del loop
     // 🔧 BL-011: anclado a Lima y a mediodía UTC. Antes dayjs(...) sin zona
@@ -360,7 +386,8 @@ export const CuentasPorCobrarService = {
       data: { fecha_fin_ciclo: fechaCierre }
     });
 
-    for (const ins of paqueteActual) {
+    for (let i = 0; i < paqueteActual.length; i++) {
+      const ins = paqueteActual[i];
       await tx.inscripciones.update({
         where: { id: ins.id },
         data: {
@@ -375,7 +402,7 @@ export const CuentasPorCobrarService = {
         data: {
           inscripcion_id: ins.id,
           cuenta_id: nuevaCuenta.id,
-          monto_asignado: montoPorSlot,
+          monto_asignado: partesPorSlot[i],
           fecha_inicio_ciclo: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
           fecha_fin_ciclo: null
         }
@@ -421,7 +448,9 @@ export const CuentasPorCobrarService = {
 
       if (!conceptoPaquete) throw new Error(`⛔ No existe un plan para ${paqueteActual.length} clases en el catálogo.`);
 
-      const montoTotal = Number(conceptoPaquete.precio_base);
+      // 💰 BL-002: el precio sale del catálogo, normalizado a 2 decimales.
+      // 🛍️ Solo el plan: el merch (pago único) del ciclo anterior no se arrastra.
+      const montoTotal = redondear2(conceptoPaquete.precio_base);
       const fechaOriginalParaRevertir = paqueteActual[0].fecha_inscripcion;
 
       const nuevaCuenta = await tx.cuentas_por_cobrar.create({
@@ -435,7 +464,8 @@ export const CuentasPorCobrarService = {
         }
       });
 
-      const montoPorSlot = montoTotal / paqueteActual.length;
+      // 💰 BL-002: reparto exacto en céntimos (ver generarRenovacionPaquete).
+      const partesPorSlot = repartirMonto(montoTotal, paqueteActual.length);
 
       // 🔧 BL-011: anclado a Lima y a mediodía UTC. Antes dayjs(...) sin zona
       // parseaba en hora local del server y podía correr un día.
@@ -450,7 +480,8 @@ export const CuentasPorCobrarService = {
         data: { fecha_fin_ciclo: fechaCierre }
       });
 
-      for (const ins of paqueteActual) {
+      for (let i = 0; i < paqueteActual.length; i++) {
+        const ins = paqueteActual[i];
         await tx.inscripciones.update({
           where: { id: ins.id },
           data: {
@@ -465,7 +496,7 @@ export const CuentasPorCobrarService = {
           data: {
             inscripcion_id: ins.id,
             cuenta_id: nuevaCuenta.id,
-            monto_asignado: montoPorSlot,
+            monto_asignado: partesPorSlot[i],
             fecha_inicio_ciclo: dayjs.tz(fechaInicioNueva, TZ_LIMA).hour(12).toDate(), // 🔧 BL-011: mediodía Lima
             fecha_fin_ciclo: null
           }

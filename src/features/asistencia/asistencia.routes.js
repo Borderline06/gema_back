@@ -51,6 +51,18 @@ router.get(
   asistenciaController.listarAgenda
 );
 
+// 🤝 BL-010: alerta previa de choques con clases de recuperación.
+// Solo lectura y HTTP 200 (es una consulta, no un conflicto): el front la usa
+// para avisar al admin antes de validar el pago. Endpoint NUEVO a propósito —
+// así la alerta estructurada no obliga a tocar las llaves de ningún JSON ya
+// consumido por el frontend.
+router.get(
+  '/choques-recuperacion',
+  authorize('Administrador', 'Coordinador'),
+  validateQuery(asistenciaSchema.choquesRecuperacionQuerySchema),
+  asistenciaController.previsualizarChoquesRecuperacion
+);
+
 router.post(
   '/masiva',
   authorize('Coordinador'),

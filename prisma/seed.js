@@ -273,6 +273,16 @@ async function main() {
     });
   }
 
+  // Catálogo base de Merch (reemplaza el antiguo flag "incluye_camiseta")
+  const merchBase = [
+    { nombre: 'Camiseta Oficial Gema', descripcion: 'Camiseta oficial de la academia', precio: 50, stock: 50 },
+    { nombre: 'Gorra Gema', descripcion: 'Gorra con logo bordado', precio: 30, stock: 30 },
+  ];
+  for (const m of merchBase) {
+    const existe = await prisma.merch.findFirst({ where: { nombre: m.nombre } });
+    if (!existe) await prisma.merch.create({ data: m });
+  }
+
   // =================================================================
   // 6. ALUMNO DE PRUEBA Y HORARIO 🧪
   // =================================================================

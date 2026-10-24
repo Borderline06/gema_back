@@ -32,7 +32,7 @@ export const historialAcademicoController = {
     }
   },
 
-  // 📤 BL-013: reporte exportable de alumnos (7 columnas para el Excel)
+  // 📤 BL-013: reporte exportable de alumnos (10 columnas para el Excel)
   exportarReporteAlumnos: async (req, res, next) => {
     try {
       const { sede_id } = req.query;

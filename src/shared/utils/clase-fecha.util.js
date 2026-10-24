@@ -84,3 +84,79 @@ export const calcularPrimeraFechaClase = (fechaInicio, diaSemanaClase) => {
 
   return calcularProximasFechas(inicio, diaSemanaClase, limite)[0] ?? null;
 };
+
+// Tope de semanas que se recorren buscando fechas libres de feriado. Un año
+// entero sobra (hay ~15 feriados) y evita un bucle infinito si la tabla
+// estuviera corrupta.
+const MAX_SEMANAS_BUSQUEDA = 52;
+
+/**
+ * 🔢 Genera EXACTAMENTE `cantidad` fechas de clase: la primera ocurrencia del
+ * día de semana en o después de `fechaInicio`, y de ahí una por semana.
+ *
+ * A diferencia de `calcularProximasFechas` (que corta por fecha límite), acá el
+ * recurso es la CANTIDAD de clases. Una fecha que cae en feriado se SALTA sin
+ * consumir cupo, así que el alumno recibe siempre las clases que pagó.
+ *
+ * Misma aritmética local con ancla a mediodía que el resto del archivo (ver la
+ * cabecera: NO reescribir a UTC).
+ *
+ * @param {Date|string} fechaInicio primer día en que se puede dictar clase
+ * @param {number} diaSemanaClase 0-6 (7 se acepta como domingo)
+ * @param {number} cantidad cuántas clases generar (>= 0)
+ * @param {{esFeriado?: (fecha: Date) => boolean}} [opciones]
+ * @returns {Date[]} en orden cronológico, `cantidad` elementos
+ */
+export const calcularFechasPorConteo = (
+  fechaInicio,
+  diaSemanaClase,
+  cantidad,
+  { esFeriado = () => false } = {}
+) => {
+  if (!Number.isInteger(cantidad) || cantidad < 0) {
+    throw new Error(`Cantidad de clases invalida: ${cantidad}`);
+  }
+  if (cantidad === 0) return [];
+
+  const primera = calcularPrimeraFechaClase(fechaInicio, diaSemanaClase);
+  if (!primera) throw new Error(`Fecha de inicio invalida para generar clases: ${fechaInicio}`);
+
+  const fechas = [];
+  let candidata = primera;
+
+  for (let semana = 0; semana < MAX_SEMANAS_BUSQUEDA && fechas.length < cantidad; semana++) {
+    if (!esFeriado(candidata)) fechas.push(candidata);
+    candidata = siguienteOcurrenciaSemanal(candidata);
+  }
+
+  if (fechas.length < cantidad) {
+    throw new Error(
+      `No se hallaron ${cantidad} fechas libres de feriado en ${MAX_SEMANAS_BUSQUEDA} semanas`
+    );
+  }
+
+  return fechas;
+};
+
+/**
+ * 🔁 BL-010: la MISMA ocurrencia semanal, una semana después.
+ *
+ * Es el `+7` que `generarClaseUnica` ya hacía inline para correr una clase que
+ * cae en feriado. Se extrae porque BL-010 necesita exactamente el mismo salto
+ * cuando la fecha choca con una recuperación ya agendada, y dos copias del
+ * mismo `+7` divergirían en cuanto una se "arreglara" a UTC.
+ *
+ * ⚠️ Aritmética LOCAL con ancla a mediodía, igual que `calcularProximasFechas`
+ * (ver la cabecera de este archivo: NO reescribir a UTC). Mantener el día de
+ * semana es justo el punto: la clase sigue siendo "el martes", una semana más
+ * tarde.
+ *
+ * @param {Date|string} fecha
+ * @returns {Date} nueva instancia; NO muta la entrada
+ */
+export const siguienteOcurrenciaSemanal = (fecha) => {
+  const siguiente = new Date(fecha);
+  siguiente.setHours(12, 0, 0, 0);
+  siguiente.setDate(siguiente.getDate() + 7);
+  return siguiente;
+};

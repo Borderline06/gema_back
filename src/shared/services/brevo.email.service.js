@@ -1,11 +1,11 @@
 import { logger } from '../utils/logger.util.js';
-import { BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_TIMEOUT_MS, FRONTEND_URL } from '../../config/secret.config.js';
+import { BREVO_API_KEY, BREVO_SENDER_EMAIL, BREVO_SENDER_NAME, BREVO_TIMEOUT_MS, COMPANY_NAME, FRONTEND_URL } from '../../config/secret.config.js';
 
 const buildBaseTemplate = (bodyContent) => `
   <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
     
     <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 40px 20px; text-align: center;">
-      <h1 style="color: #ffffff; margin: 0; font-size: 28px; letter-spacing: 1px; text-transform: uppercase;">Club Gema</h1>
+      <h1 style="color: #ffffff; margin: 0; font-size: 28px; letter-spacing: 1px; text-transform: uppercase;">${COMPANY_NAME}</h1>
       <div style="height: 4px; width: 50px; background-color: #f97316; margin: 15px auto; border-radius: 2px;"></div>
     </div>
 
@@ -13,7 +13,7 @@ const buildBaseTemplate = (bodyContent) => `
 
     <div style="background-color: #f1f5f9; padding: 20px; text-align: center;">
       <p style="color: #64748b; font-size: 12px; margin: 0;">
-        © 2026 Club Gema. Todos los derechos reservados.
+        © ${new Date().getFullYear()} ${COMPANY_NAME}. Todos los derechos reservados.
       </p>
     </div>
   </div>
@@ -39,8 +39,8 @@ export const emailService = {
     const { to, toName, subject, htmlContent } = options;
     const bodyData = {
       sender: {
-        name: 'Club Gema',
-        email: BREVO_SENDER_EMAIL || 'no-reply@academiagema.com',
+        name: BREVO_SENDER_NAME,
+        email: BREVO_SENDER_EMAIL,
       },
       to: [
         {
@@ -135,7 +135,7 @@ export const emailService = {
     return this.send({
       to: email,
       toName: nombres,
-      subject: 'Recuperación de Contraseña - Club Gema',
+      subject: `Recuperación de Contraseña - ${COMPANY_NAME}`,
       htmlContent,
     });
   },
@@ -187,7 +187,7 @@ export const emailService = {
     return this.send({
       to: email,
       toName: nombres,
-      subject: '¡Bienvenido a Club Gema! 🏐 Tus credenciales',
+      subject: `¡Bienvenido a ${COMPANY_NAME}! 🏐 Tus credenciales`,
       htmlContent,
     });
   },
@@ -203,7 +203,7 @@ export const emailService = {
       <div style="padding: 40px 30px; text-align: center;">
         <h2 style="color: #1e293b; margin-top: 0; font-size: 24px;">¡Feliz Cumpleaños, ${nombres}! 🎉</h2>
         <p style="color: #475569; line-height: 1.6; font-size: 16px;">
-          De parte de toda la familia de Club Gema queremos desearte un día lleno de alegría y éxito.
+          De parte de toda la familia de ${COMPANY_NAME} queremos desearte un día lleno de alegría y éxito.
         </p>
         <div style="font-size: 50px; margin: 20px 0;">🎂 🏐</div>
         <p style="color: #475569; line-height: 1.6; font-size: 16px;">
@@ -215,7 +215,7 @@ export const emailService = {
     return this.send({
       to: email,
       toName: nombres,
-      subject: '¡Feliz Cumpleaños! 🎉🎂 - Club Gema',
+      subject: `¡Feliz Cumpleaños! 🎉🎂 - ${COMPANY_NAME}`,
       htmlContent,
     });
   },
@@ -231,7 +231,7 @@ export const emailService = {
       <div style="padding: 30px;">
         <h2 style="color: #1e293b; margin-top: 0; font-size: 20px;">Hola, ${nombres}</h2>
         <p style="color: #475569; line-height: 1.6; font-size: 15px;">
-          Te recordamos amablemente que tienes un <strong>saldo pendiente (pago parcial)</strong> en tu mensualidad de Club Gema.
+          Te recordamos amablemente que tienes un <strong>saldo pendiente (pago parcial)</strong> en tu mensualidad de ${COMPANY_NAME}.
         </p>
         <p style="color: #475569; line-height: 1.6; font-size: 15px;">
           Para evitar la suspensión de tus accesos o pérdida de beneficios de alumno antiguo, por favor regularízalo antes del cierre de tu ciclo de facturación.
@@ -248,7 +248,7 @@ export const emailService = {
     return this.send({
       to: email,
       toName: nombres,
-      subject: 'Aviso Importante: Saldo Pendiente - Club Gema',
+      subject: `Aviso Importante: Saldo Pendiente - ${COMPANY_NAME}`,
       htmlContent,
     });
   },

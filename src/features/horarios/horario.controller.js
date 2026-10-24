@@ -48,5 +48,14 @@ export const horarioController = {
       message: 'Horarios por nivel obtenidos.',
       data: horarios,
     })
+  }),
+
+  getDisponibilidad: catchAsync(async (req, res) => {
+    const { desde, hasta } = req.query;
+    const disponibilidad = await horarioService.getDisponibilidad(req.params.id, desde, hasta);
+    return apiResponse.success(res, {
+      message: 'Disponibilidad obtenida exitosamente',
+      data: disponibilidad,
+    });
   })
 };
