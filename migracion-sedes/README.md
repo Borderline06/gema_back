@@ -78,7 +78,11 @@ indicando política y cantidad de casos.
 * Alumnos sin inscripción (155): migran como cuentas sin inscripción.
 * Movimientos financieros sin sede: no migran. `notificaciones.usuario_id`: la base nueva conserva la columna (vacía) y la elimina una migración Prisma (opción A).
 * Compras agrupadas entre sedes (caso 4, 5 casos con estas sedes): sin acción por ahora (`permitir`); se pueden añadir al final.
-* Finanzas (`cuentas*`): criterio provisional por alumno, aún sin decisión del cliente.
+* Finanzas (`cuentas`, `cuenta_mixta`, `cuenta_sin_link`): se mantiene el criterio por alumno (todo el historial de cada alumno que migra).
+  Decisión del equipo, **no consultada con el cliente**: se estima irrelevante porque la migración es solo para separar sistemas.
+  Anotado por si se revisa: con las sedes 1,2,3,6,11 (dump del 03/10/2026) unas 51 cuentas de 851 son ambiguas y quedan en ambos sistemas:
+  20 cuentas de sedes que no migran (S/ 3.305), 11 mixtas (S/ 2.510) y 20 sin vínculo de alumnos multi-sede.
+  Si hiciera falta: `cuentas=por_inscripcion` y `cuenta_mixta=descartar|conservar`.
 
 Para quitar `notificaciones.usuario_id` sin deriva: ajustar código y `schema.prisma`, `prisma migrate dev --name quitar_notificaciones_usuario_id` y `prisma migrate deploy` sobre la base nueva; comprobar con `prisma migrate diff --from-url <base> --to-schema-datamodel prisma/schema.prisma --script` (sin salida = sin deriva). El motor soporta también `eliminar_columna` (borrado manual), que obligaría a `prisma migrate resolve --applied`.
 El detector de NULL (`_mig.nulls_*`) compara totales y puede enmascarar aumentos al borrar filas; los NULL deliberados se registran en `_mig.hallazgos`.
