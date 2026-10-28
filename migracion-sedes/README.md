@@ -76,11 +76,11 @@ indicando política y cantidad de casos.
   pagos, lesiones, descuentos, beneficios y reprogramaciones creadas.
 * Recuperaciones de alumnos visitantes: se borran. Destino de recuperación fuera de las sedes y `registrado_por` de coordinadores ajenos: NULL.
 * Alumnos sin inscripción (155): migran como cuentas sin inscripción.
-* Movimientos financieros sin sede: no migran. `notificaciones.usuario_id`: se elimina de la base nueva.
+* Movimientos financieros sin sede: no migran. `notificaciones.usuario_id`: la base nueva conserva la columna (vacía) y la elimina una migración Prisma (opción A).
 * Compras agrupadas entre sedes (caso 4, 5 casos con estas sedes): sin acción por ahora (`permitir`); se pueden añadir al final.
 * Finanzas (`cuentas*`): criterio provisional por alumno, aún sin decisión del cliente.
 
-Al eliminar la columna a mano la base nueva queda con deriva respecto de `schema.prisma` y de `_prisma_migrations`: el cambio de código/esquema lo gestiona el equipo.
+Para quitar `notificaciones.usuario_id` sin deriva: ajustar código y `schema.prisma`, `prisma migrate dev --name quitar_notificaciones_usuario_id` y `prisma migrate deploy` sobre la base nueva; comprobar con `prisma migrate diff --from-url <base> --to-schema-datamodel prisma/schema.prisma --script` (sin salida = sin deriva). El motor soporta también `eliminar_columna` (borrado manual), que obligaría a `prisma migrate resolve --applied`.
 El detector de NULL (`_mig.nulls_*`) compara totales y puede enmascarar aumentos al borrar filas; los NULL deliberados se registran en `_mig.hallazgos`.
 
 ```
