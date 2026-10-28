@@ -35,14 +35,16 @@ docker exec -i gema_academy_db psql -U postgres -d corte_nuevo < sql/20_validar.
 | recup_ref_asistencia | anular_nuevos · dejar |
 | alumnos_sin_inscripcion | no_copiar · copiar |
 | mov_sin_sede | no_copiar · copiar |
-| admin_foraneo | conservar · anular_referencia · bloquear |
+| admin_foraneo | conservar · anular_referencia · reasignar · bloquear |
+| admin_reasignar_a | (libre) id o nombre del admin de destino; obligatorio con `reasignar` |
 | coord_foraneo | conservar · anular_referencia · bloquear |
 | publicaciones | solo_admin_conservado · no_copiar · copiar_todas |
 | grupo_transaccion_mixto | permitir · bloquear |
 | refresh_tokens | no_copiar · copiar |
+| notificaciones_usuario_id | conservar_columna · eliminar_columna |
 | credenciales | copiar · no_copiar |
 
-Presets: `default`, `por_sede` (solo lo ligado a las sedes), `completa` (máxima conservación),
+Presets: `nuevo_sistema` (decisiones vigentes del cliente), `default`, `por_sede` (solo lo ligado a las sedes), `completa` (máxima conservación),
 `estricta` (excluye multi-sede y **bloquea** ante lo ambiguo).
 
 Los defaults NO son decisiones del cliente: son un punto de partida. `bloquear` aborta con un mensaje
@@ -66,3 +68,21 @@ indicando política y cantidad de casos.
 * Combinaciones de políticas no probadas: probadas en dry-run `ninguno`, `excluir`, `estricta`; confirmadas y
   validadas `default`, `por_sede`, `completa`.
 * `sql/10_extraer_sedes.sql` es el prototipo v1 (línea base, criterio fijo). Usar `30_migrar_sedes.sql`.
+
+## Decisiones vigentes del cliente (preset `nuevo_sistema`, 28/10/2026)
+* Sedes: Aráoz (mar y jue) = 1, Aráoz (sáb y dom) = 2, Tottus 1 = 11, Tottus 2 = 3, Mirones = 6 (`keep=1,2,3,6,11`).
+  Pendiente de confirmar: que Aráoz 1 sea mar y jue.
+* Lo registrado/aprobado por Eddy (admin de ATE) pasa a Gerardo Melchor (`admin_foraneo=reasignar`, `admin_reasignar_a=Gerardo Melchor`):
+  pagos, lesiones, descuentos, beneficios y reprogramaciones creadas.
+* Recuperaciones de alumnos visitantes: se borran. Destino de recuperación fuera de las sedes y `registrado_por` de coordinadores ajenos: NULL.
+* Alumnos sin inscripción (155): migran como cuentas sin inscripción.
+* Movimientos financieros sin sede: no migran. `notificaciones.usuario_id`: se elimina de la base nueva.
+* Compras agrupadas entre sedes (caso 4, 5 casos con estas sedes): sin acción por ahora (`permitir`); se pueden añadir al final.
+* Finanzas (`cuentas*`): criterio provisional por alumno, aún sin decisión del cliente.
+
+Al eliminar la columna a mano la base nueva queda con deriva respecto de `schema.prisma` y de `_prisma_migrations`: el cambio de código/esquema lo gestiona el equipo.
+El detector de NULL (`_mig.nulls_*`) compara totales y puede enmascarar aumentos al borrar filas; los NULL deliberados se registran en `_mig.hallazgos`.
+
+```
+./migrar.sh gema_academy_nuevo_sistema 1,2,3,6,11 nuevo_sistema --confirmar
+```

@@ -13,11 +13,13 @@ POLITICAS = [
     ("recup_ref_asistencia", "anular_nuevos", ["dejar", "anular_nuevos"], "registro_asistencia_id (sin FK) que apuntaria a asistencia no migrada"),
     ("alumnos_sin_inscripcion", "no_copiar", ["copiar", "no_copiar"], "Alumnos sin ninguna inscripcion (sede no deducible)"),
     ("mov_sin_sede", "no_copiar", ["copiar", "no_copiar"], "movimientos_financieros con sede_id NULL"),
-    ("admin_foraneo", "conservar", ["conservar", "anular_referencia", "bloquear"], "Admin de sede no migrada referenciado por filas migradas"),
+    ("admin_foraneo", "conservar", ["conservar", "anular_referencia", "reasignar", "bloquear"], "Admin de sede no migrada referenciado por filas migradas"),
+    ("admin_reasignar_a", "", None, "Con admin_foraneo=reasignar: id o nombre del administrador de destino (debe resolver a uno solo)"),
     ("coord_foraneo", "conservar", ["conservar", "anular_referencia", "bloquear"], "Coordinador que registro asistencia en sede migrada sin dictar alli"),
     ("publicaciones", "solo_admin_conservado", ["solo_admin_conservado", "no_copiar", "copiar_todas"], "Publicaciones (autor NOT NULL)"),
     ("grupo_transaccion_mixto", "permitir", ["permitir", "bloquear"], "Compra (id_grupo_transaccion) con inscripciones migradas y no migradas"),
     ("refresh_tokens", "no_copiar", ["copiar", "no_copiar"], "Sesiones activas"),
+    ("notificaciones_usuario_id", "conservar_columna", ["conservar_columna", "eliminar_columna"], "Eliminar notificaciones.usuario_id de la base nueva"),
     ("credenciales", "copiar", ["copiar", "no_copiar"], "Hash de credenciales (no_copiar = obliga a restablecer contrasena)"),
 ]
 
@@ -29,8 +31,8 @@ lines.append("insert into _mig.politica(clave, valor, permitidos, descripcion)")
 lines.append("select k, coalesce(nullif(ov, ''), def), perm, descr from (values")
 vals = []
 for k, d, perm, desc in POLITICAS:
-    arr = ",".join(f"'{x}'" for x in perm)
-    vals.append(f"  ('{k}', :'p_{k}', '{d}', array[{arr}], '{desc}')")
+    arr = "null::text[]" if perm is None else "array[" + ",".join(f"'{x}'" for x in perm) + "]"
+    vals.append(f"  ('{k}', :'p_{k}', '{d}', {arr}, '{desc}')")
 lines.append(",\n".join(vals))
 lines.append(") v(k, ov, def, perm, descr);")
 pathlib.Path(__file__).parent.joinpath("sql", "_politica_bloque.sql").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

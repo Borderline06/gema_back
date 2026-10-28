@@ -38,6 +38,10 @@
 \else
 \set p_admin_foraneo ''
 \endif
+\if :{?p_admin_reasignar_a}
+\else
+\set p_admin_reasignar_a ''
+\endif
 \if :{?p_coord_foraneo}
 \else
 \set p_coord_foraneo ''
@@ -53,6 +57,10 @@
 \if :{?p_refresh_tokens}
 \else
 \set p_refresh_tokens ''
+\endif
+\if :{?p_notificaciones_usuario_id}
+\else
+\set p_notificaciones_usuario_id ''
 \endif
 \if :{?p_credenciales}
 \else
@@ -70,10 +78,12 @@ select k, coalesce(nullif(ov, ''), def), perm, descr from (values
   ('recup_ref_asistencia', :'p_recup_ref_asistencia', 'anular_nuevos', array['dejar','anular_nuevos'], 'registro_asistencia_id (sin FK) que apuntaria a asistencia no migrada'),
   ('alumnos_sin_inscripcion', :'p_alumnos_sin_inscripcion', 'no_copiar', array['copiar','no_copiar'], 'Alumnos sin ninguna inscripcion (sede no deducible)'),
   ('mov_sin_sede', :'p_mov_sin_sede', 'no_copiar', array['copiar','no_copiar'], 'movimientos_financieros con sede_id NULL'),
-  ('admin_foraneo', :'p_admin_foraneo', 'conservar', array['conservar','anular_referencia','bloquear'], 'Admin de sede no migrada referenciado por filas migradas'),
+  ('admin_foraneo', :'p_admin_foraneo', 'conservar', array['conservar','anular_referencia','reasignar','bloquear'], 'Admin de sede no migrada referenciado por filas migradas'),
+  ('admin_reasignar_a', :'p_admin_reasignar_a', '', null::text[], 'Con admin_foraneo=reasignar: id o nombre del administrador de destino (debe resolver a uno solo)'),
   ('coord_foraneo', :'p_coord_foraneo', 'conservar', array['conservar','anular_referencia','bloquear'], 'Coordinador que registro asistencia en sede migrada sin dictar alli'),
   ('publicaciones', :'p_publicaciones', 'solo_admin_conservado', array['solo_admin_conservado','no_copiar','copiar_todas'], 'Publicaciones (autor NOT NULL)'),
   ('grupo_transaccion_mixto', :'p_grupo_transaccion_mixto', 'permitir', array['permitir','bloquear'], 'Compra (id_grupo_transaccion) con inscripciones migradas y no migradas'),
   ('refresh_tokens', :'p_refresh_tokens', 'no_copiar', array['copiar','no_copiar'], 'Sesiones activas'),
+  ('notificaciones_usuario_id', :'p_notificaciones_usuario_id', 'conservar_columna', array['conservar_columna','eliminar_columna'], 'Eliminar notificaciones.usuario_id de la base nueva'),
   ('credenciales', :'p_credenciales', 'copiar', array['copiar','no_copiar'], 'Hash de credenciales (no_copiar = obliga a restablecer contrasena)')
 ) v(k, ov, def, perm, descr);

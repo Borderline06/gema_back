@@ -21,7 +21,7 @@ begin;
 drop schema if exists _mig cascade;
 create schema _mig;
 
-create table _mig.politica(clave text primary key, valor text not null, permitidos text[] not null, descripcion text);
+create table _mig.politica(clave text primary key, valor text not null, permitidos text[], descripcion text);   -- permitidos NULL = parametro libre (sin lista de valores)
 -- @@POLITICA@@
 do $$ declare r record; begin
   for r in select * from _mig.politica where valor <> all(permitidos) loop
@@ -168,8 +168,22 @@ create table _mig.admin_foraneos as
 select id from _mig.admin_ref where id not in (select id from _mig.admin_sede);
 insert into _mig.hallazgos select 'ADMIN_FORANEO','admin_foraneo','admins de otras sedes referenciados por filas migradas', count(*) from _mig.admin_foraneos;
 select _mig.bloqueo('admin_foraneo','ADMIN_FORANEO',(select count(*) from _mig.admin_foraneos));
+-- admin_foraneo=reasignar: administrador de destino (id numerico o nombre; debe resolver a UN solo administrador)
+create table _mig.admin_destino as
+select a.usuario_id id from public.administrador a join public.usuarios u on u.id = a.usuario_id
+where _mig.pol('admin_foraneo') = 'reasignar'
+  and ((_mig.pol('admin_reasignar_a') ~ '^[0-9]+$' and a.usuario_id::text = _mig.pol('admin_reasignar_a'))
+    or (_mig.pol('admin_reasignar_a') !~ '^[0-9]*$' and trim(u.nombres || ' ' || u.apellidos) ilike '%' || _mig.pol('admin_reasignar_a') || '%'));
+do $$ begin
+  if _mig.pol('admin_foraneo') = 'reasignar' and (select count(*) from _mig.admin_destino) <> 1 then
+    raise exception 'admin_foraneo=reasignar: admin_reasignar_a="%" debe resolver a exactamente 1 administrador (resuelve a %)',
+      _mig.pol('admin_reasignar_a'), (select count(*) from _mig.admin_destino);
+  end if;
+end $$;
 create table _mig.k_admin as
-select id from _mig.admin_sede union select id from _mig.admin_foraneos where _mig.pol('admin_foraneo')='conservar';
+select id from _mig.admin_sede
+union select id from _mig.admin_foraneos where _mig.pol('admin_foraneo')='conservar'
+union select id from _mig.admin_destino;
 
 create table _mig.k_usuarios as select id from _mig.k_alumnos union select id from _mig.k_coord union select id from _mig.k_admin;
 
@@ -180,7 +194,8 @@ insert into _mig.hallazgos select 'GRUPO_TRANS_MIXTO','grupo_transaccion_mixto',
 select _mig.bloqueo('grupo_transaccion_mixto','GRUPO_TRANS_MIXTO',(select n from _mig.hallazgos where codigo='GRUPO_TRANS_MIXTO'));
 insert into _mig.hallazgos select 'CONGELAMIENTO_SIN_INSCRIPCION',null,'congelamientos sin inscripcion (se resuelven por alumno de la lesion)', count(*) from public.congelamientos where inscripcion_id is null;
 insert into _mig.hallazgos select 'REPROG_CREADOR_ANULADO',null,'reprogramaciones migradas cuyo creador no migra (creado_por queda NULL)', count(*)
-  from public.reprogramaciones_clases where horario_id in (select id from _mig.k_horarios) and creado_por is not null and creado_por not in (select id from _mig.k_usuarios);
+  from public.reprogramaciones_clases where horario_id in (select id from _mig.k_horarios) and creado_por is not null and creado_por not in (select id from _mig.k_usuarios)
+   and not (_mig.pol('admin_foraneo')='reasignar' and creado_por in (select usuario_id from public.administrador));   -- los admins se reasignan, no se anulan
 insert into _mig.hallazgos select 'USUARIO_DOBLE_PERFIL',null,'usuarios migrados con perfil de alumno y coordinador', count(*)
   from (select id from _mig.k_alumnos intersect select id from _mig.k_coord) x;
 insert into _mig.hallazgos select 'ADMIN_SEDE_ANULADA',null,'admins conservados cuya sede no migra (sede_id queda NULL)', count(*)
@@ -228,8 +243,9 @@ from public.recuperaciones r;
 -- ------------------------------------------------------------ borrado en orden de FK
 create table _mig.asist_borradas as select id from public.registros_asistencia where inscripcion_id not in (select id from _mig.k_ins);
 delete from public.registros_asistencia where inscripcion_id not in (select id from _mig.k_ins);
-update public.registros_asistencia set registrado_por = null
- where _mig.pol('coord_foraneo')='anular_referencia' and registrado_por in (select id from _mig.coord_foraneos);
+with u as (update public.registros_asistencia set registrado_por = null
+           where _mig.pol('coord_foraneo')='anular_referencia' and registrado_por in (select id from _mig.coord_foraneos) returning 1)
+  insert into _mig.hallazgos select 'ASISTENCIA_REGISTRADO_POR_ANULADO','coord_foraneo','registros_asistencia migrados con registrado_por = NULL (coordinador no migra)', count(*) from u;
 
 -- congelamientos.inscripcion_id es nullable: "NOT IN" con NULL no borra -> se liga al alumno por la lesion
 delete from public.congelamientos c
@@ -263,6 +279,26 @@ update public.solicitudes_lesion set revisado_por = null where _mig.pol('admin_f
 update public.movimientos_financieros set registrado_por = null where _mig.pol('admin_foraneo')='anular_referencia' and registrado_por in (select id from _mig.admin_foraneos);
 delete from public.beneficios_pendientes where _mig.pol('admin_foraneo')='anular_referencia' and asignado_por in (select id from _mig.admin_foraneos);   -- asignado_por NOT NULL
 
+-- admin_foraneo=reasignar: lo registrado/aprobado por un admin que no migra pasa al admin de destino (cada tabla deja su conteo en hallazgos)
+create table _mig.admin_reasignar as
+select id from _mig.admin_foraneos where _mig.pol('admin_foraneo')='reasignar' and id not in (select id from _mig.admin_destino);
+with u as (update public.pagos set revisado_por = (select id from _mig.admin_destino) where revisado_por in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_PAGOS','admin_foraneo','pagos.revisado_por reasignados al admin de destino', count(*) from u;
+with u as (update public.descuentos_aplicados set aplicado_por = (select id from _mig.admin_destino) where aplicado_por in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_DESCUENTOS','admin_foraneo','descuentos_aplicados.aplicado_por reasignados', count(*) from u;
+with u as (update public.solicitudes_lesion set revisado_por = (select id from _mig.admin_destino) where revisado_por in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_LESIONES','admin_foraneo','solicitudes_lesion.revisado_por reasignados', count(*) from u;
+with u as (update public.movimientos_financieros set registrado_por = (select id from _mig.admin_destino) where registrado_por in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_MOVIMIENTOS','admin_foraneo','movimientos_financieros.registrado_por reasignados', count(*) from u;
+with u as (update public.beneficios_pendientes set asignado_por = (select id from _mig.admin_destino) where asignado_por in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_BENEFICIOS','admin_foraneo','beneficios_pendientes.asignado_por reasignados', count(*) from u;
+with u as (update public.publicaciones set autor_id = (select id from _mig.admin_destino) where _mig.pol('publicaciones')<>'no_copiar' and autor_id in (select id from _mig.admin_reasignar) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_PUBLICACIONES','admin_foraneo','publicaciones.autor_id reasignados', count(*) from u;
+with u as (update public.reprogramaciones_clases set creado_por = (select id from _mig.admin_destino)
+           where _mig.pol('admin_foraneo')='reasignar' and horario_id in (select id from _mig.k_horarios)
+             and creado_por in (select usuario_id from public.administrador) and creado_por not in (select id from _mig.k_usuarios) returning 1)
+  insert into _mig.hallazgos select 'REASIGNADO_REPROGRAMACIONES','admin_foraneo','reprogramaciones_clases.creado_por (admins que no migran) reasignados', count(*) from u;
+
 delete from public.publicaciones
  where _mig.pol('publicaciones')='no_copiar' or autor_id not in (select id from _mig.k_admin);
 delete from public.administrador where usuario_id not in (select id from _mig.k_admin);
@@ -278,6 +314,20 @@ delete from public.sedes    where id not in (select id from _mig.k_sedes);
 delete from public.notificaciones n
  where not (coalesce(n.alumno_id in (select id from _mig.k_alumnos), false)
          or coalesce(n.usuario_id in (select id from _mig.k_usuarios), false));
+
+-- notificaciones_usuario_id=eliminar_columna: la columna se elimina de la base NUEVA. Las filas que solo tenian dueno por usuario_id
+-- (sin alumno_id) quedarian sin dueno al eliminarla: se descartan y se cuentan. Las que tienen alumno_id se conservan.
+insert into _mig.hallazgos select 'NOTIF_USUARIO_ID_FILAS','notificaciones_usuario_id','notificaciones migradas que usan usuario_id (antes de eliminar la columna)', count(*)
+  from public.notificaciones where usuario_id is not null and _mig.pol('notificaciones_usuario_id')='eliminar_columna';
+insert into _mig.hallazgos select 'NOTIF_SIN_DUENO_DESCARTADAS','notificaciones_usuario_id','notificaciones solo con usuario_id (sin alumno_id) descartadas', count(*)
+  from public.notificaciones where usuario_id is not null and alumno_id is null and _mig.pol('notificaciones_usuario_id')='eliminar_columna';
+delete from public.notificaciones where _mig.pol('notificaciones_usuario_id')='eliminar_columna' and usuario_id is not null and alumno_id is null;
+do $$ begin
+  if _mig.pol('notificaciones_usuario_id') = 'eliminar_columna'
+     and exists (select 1 from information_schema.columns where table_schema='public' and table_name='notificaciones' and column_name='usuario_id') then
+    alter table public.notificaciones drop column usuario_id;   -- arrastra su FK a usuarios
+  end if;
+end $$;
 
 delete from public.alumnos       where usuario_id not in (select id from _mig.k_alumnos);
 delete from public.coordinadores where usuario_id not in (select id from _mig.k_coord);

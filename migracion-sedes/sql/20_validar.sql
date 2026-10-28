@@ -26,7 +26,7 @@ union all select 'beneficios_pendientes.asignado_por', count(*) from public.bene
 select 'usuario sin ningun perfil' chk, count(*) from public.usuarios u where not exists (select 1 from alumnos a where a.usuario_id=u.id) and not exists (select 1 from coordinadores c where c.usuario_id=u.id) and not exists (select 1 from administrador d where d.usuario_id=u.id)
 union all select 'alumno sin inscripcion', count(*) from public.alumnos a where not exists (select 1 from inscripciones i where i.alumno_id=a.usuario_id)
 union all select 'coordinador sin horario ni asistencia', count(*) from public.coordinadores c where not exists (select 1 from horarios_clases h where h.coordinador_id=c.usuario_id) and not exists (select 1 from registros_asistencia r where r.registrado_por=c.usuario_id)
-union all select 'notificacion sin dueno', count(*) from public.notificaciones where alumno_id is null and usuario_id is null
+union all select 'notificacion sin dueno', count(*) from public.notificaciones n where alumno_id is null and (to_jsonb(n)->>'usuario_id') is null   -- to_jsonb: sirve con o sin la columna usuario_id
 union all select 'sede de administrador fuera del conjunto', count(*) from public.administrador where sede_id is not null and sede_id not in (select id from public.sedes);
 
 \echo === V5. Solo quedan sedes esperadas, y todo hecho cuelga de una sede conservada
@@ -50,3 +50,22 @@ select s.sequencename, s.last_value, m.max_id from pg_sequences s
 
 \echo === V9. Conteos origen vs final
 select o.tabla, o.n origen, f.n final, o.n - f.n eliminados from _mig.conteo_origen o join _mig.conteo_final f using (tabla) where o.n <> f.n order by 1;
+
+\echo === V10. Politicas de personas: ningun admin que no migra debe seguir en el destino (reasignar/anular) y las reasignaciones apuntan al destino
+select 'admin no migrado aun presente' chk, count(*) from _mig.admin_foraneos f join public.usuarios u on u.id=f.id
+ where _mig.pol('admin_foraneo') in ('reasignar','anular_referencia') and f.id not in (select id from _mig.admin_destino);
+select 'admin de destino (reasignar)' chk, string_agg(u.id || ' ' || u.nombres || ' ' || u.apellidos, ', ') from _mig.admin_destino d join public.usuarios u on u.id=d.id;
+select 'filas que aun apuntan a un admin reasignado' chk,
+  (select count(*) from public.pagos where revisado_por in (select id from _mig.admin_reasignar))
+ + (select count(*) from public.solicitudes_lesion where revisado_por in (select id from _mig.admin_reasignar))
+ + (select count(*) from public.descuentos_aplicados where aplicado_por in (select id from _mig.admin_reasignar))
+ + (select count(*) from public.beneficios_pendientes where asignado_por in (select id from _mig.admin_reasignar)) n;
+
+\echo === V11. Columna notificaciones.usuario_id (debe ser 0 si la politica es eliminar_columna) y notificaciones sin dueno
+select 'columna usuario_id presente' chk, count(*) from information_schema.columns where table_schema='public' and table_name='notificaciones' and column_name='usuario_id';
+select 'notificaciones sin alumno_id' chk, count(*) from public.notificaciones where alumno_id is null;
+
+\echo === V12. Alumnos sin inscripcion migrados (INFORMATIVO: coincide con la politica alumnos_sin_inscripcion)
+select _mig.pol('alumnos_sin_inscripcion') politica, count(*) alumnos_sin_inscripcion from public.alumnos a where not exists (select 1 from public.inscripciones i where i.alumno_id=a.usuario_id);
+select 'recuperaciones de alumnos sin ninguna inscripcion (visitantes; 0 si la politica es eliminar)' chk, count(*) from public.recuperaciones r
+ where not exists (select 1 from public.inscripciones i where i.alumno_id=r.alumno_id);
