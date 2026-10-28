@@ -489,16 +489,8 @@ export const pagosService = {
         }
       });
 
-      // 3. Notificar al sistema para auditoría
-      await tx.notificaciones.create({
-        data: {
-          usuario_id: parseInt(adminId),
-          titulo: '🎟️ Pase Generado',
-          mensaje: `Se vendió una clase suelta a ${nombre_visitante} por S/ ${monto}.`,
-          tipo: 'SUCCESS',
-          categoria: 'VENTAS'
-        }
-      });
+      // La auditoría de la venta queda en el pago (codigo_operacion VISITA-* y revisado_por).
+      // Ya no se crea notificación: notificaciones.usuario_id fue eliminado y un aviso sin alumno no tiene receptor.
 
       return {
         success: true,

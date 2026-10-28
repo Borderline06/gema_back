@@ -5,7 +5,6 @@ export const notificacionesService = {
   crear: async (data) => {
     return await prisma.notificaciones.create({
       data: {
-        usuario_id: data.usuarioId || null,
         alumno_id: data.alumnoId || null,
         titulo: data.titulo,
         mensaje: data.mensaje,
@@ -35,15 +34,10 @@ export const notificacionesService = {
     });
   },
 
-  // 🔥 SOLUCIÓN: Busca tanto en usuario_id como en alumno_id
+  // El receptor de un aviso es el alumno (alumno_id); el id del usuario autenticado coincide con el del alumno
   obtenerPorUsuario: async (usuarioId) => {
     return await prisma.notificaciones.findMany({
-      where: { 
-        OR: [
-          { usuario_id: usuarioId },
-          { alumno_id: usuarioId }
-        ]
-      },
+      where: { alumno_id: usuarioId },
       include: {
         alumnos: {
           include: { usuarios: { select: { nombres: true, apellidos: true } } }
@@ -54,16 +48,10 @@ export const notificacionesService = {
     });
   },
 
-  // 🔥 SOLUCIÓN: Aplica el mismo OR para el contador de la campanita
+  // Contador de la campanita (mismo criterio que obtenerPorUsuario)
   obtenerConteoNoLeidas: async (usuarioId) => {
     return await prisma.notificaciones.count({
-      where: {
-        OR: [
-          { usuario_id: usuarioId },
-          { alumno_id: usuarioId }
-        ],
-        leido: false
-      }
+      where: { alumno_id: usuarioId, leido: false }
     });
   },
 };

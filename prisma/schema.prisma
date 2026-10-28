@@ -424,7 +424,6 @@ model usuarios {
   credenciales_usuario    credenciales_usuario?
   coordinadores           coordinadores?
   refresh_tokens          refresh_tokens[]
-  notificaciones          notificaciones[]
   reprogramaciones_clases reprogramaciones_clases[]
   auditoria_ajuste_fecha  auditoria_ajuste_fecha[]
   merch_gestionado        alumno_merch[]            @relation("MerchGestionadoPor")
@@ -510,11 +509,7 @@ model publicaciones {
 model notificaciones {
   id Int @id @default(autoincrement())
 
-  // EL RECEPTOR: ¿Quién va a ver este aviso en su Dashboard?
-  // Se relaciona con usuarios para que sirva para Admins o Alumnos.
-  usuario_id Int?
-
-  // EL AFECTADO: ¿A qué alumna se refiere esta alerta? (Para el Verdugo/Francotirador)
+  // EL RECEPTOR / AFECTADO: ¿A qué alumna se refiere esta alerta? (Para el Verdugo/Francotirador)
   alumno_id Int?
 
   titulo    String   @db.VarChar(100)
@@ -525,7 +520,6 @@ model notificaciones {
   creado_en DateTime @default(now()) @db.Timestamp(6)
 
   // RELACIONES
-  usuarios usuarios? @relation(fields: [usuario_id], references: [id], onDelete: Cascade)
   alumnos  alumnos?  @relation(fields: [alumno_id], references: [usuario_id], onDelete: SetNull)
 }
 
