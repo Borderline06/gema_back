@@ -22,6 +22,51 @@ docker exec -i gema_academy_db psql -U postgres -d corte_nuevo < sql/20_validar.
 `migrar.sh <base> <ids sedes> [preset] [clave=valor ...] [--confirmar]`. Las sedes se pasan como ids
 (resolver nombre → id con `select id, nombre from sedes`). Nunca usar sobre producción: borra datos.
 
+## Flujo completo: del dump de la madre al sistema nuevo
+
+Receta usada para el sistema nuevo (preset `nuevo_sistema`, sedes 1,2,3,6,11). Repetir con un dump
+más reciente cambia las cifras, no el procedimiento. Contenedor y usuario de ejemplo: `gema_academy_db`
+/ `postgres`. En Git Bash anteponer `MSYS_NO_PATHCONV=1` a los `docker run` con rutas.
+
+```bash
+# 1. Restaurar el dump de la madre en una base de origen (intacta, solo lectura).
+#    El dump suele ser formato custom 1.16 (PG17/18): usar cliente pg_restore 18.
+docker exec gema_academy_db psql -U postgres -c "CREATE DATABASE corte_origen"
+docker run --rm -v "D:\Gema:/d:ro" postgres:18-alpine pg_restore --no-owner --no-privileges \
+  -h host.docker.internal -U postgres -d corte_origen /d/<dump-madre>.dump
+#    (error benigno esperado en servidor 15/16: SET transaction_timeout)
+
+# 2. Copia desechable: el ETL borra datos, nunca correrlo sobre corte_origen.
+docker exec gema_academy_db psql -U postgres -c "CREATE DATABASE nuevo_sistema TEMPLATE corte_origen"
+
+# 3. Sedes a migrar (ids), según lo acordado con el cliente.
+docker exec gema_academy_db psql -U postgres -d corte_origen -c "select id, nombre from sedes order by id"
+
+# 4. Dry-run (ROLLBACK, solo reporte) y luego persistir.
+./migrar.sh nuevo_sistema 1,2,3,6,11 nuevo_sistema
+./migrar.sh nuevo_sistema 1,2,3,6,11 nuevo_sistema --confirmar
+
+# 5. Validar (FKs, huérfanos, duplicados, conteos, política de admin).
+docker exec -i gema_academy_db psql -U postgres -d nuevo_sistema < sql/20_validar.sql
+
+# 6. Dump final, sin el esquema de trazabilidad _mig.
+docker exec gema_academy_db pg_dump -U postgres -Fc -N _mig --no-owner --no-privileges nuevo_sistema > dump-nuevo-sistema.dump
+
+# 7. Restaurar en el destino (Render/Railway). Debe estar vacío; si no, DROP SCHEMA public CASCADE; CREATE SCHEMA public.
+docker run --rm -v "D:\Gema:/d:ro" -e PGSSLMODE=require postgres:16-alpine pg_restore \
+  --no-owner --no-privileges --exit-on-error -d "<URL_PUBLICA_DESTINO>" /d/dump-nuevo-sistema.dump
+```
+
+Después de restaurar:
+
+- Arrancar el backend: `npm start` corre `prisma migrate deploy` y aplica las migraciones posteriores al dump.
+- Verificar en el destino: 35 tablas antes de migrar (más las que añadan migraciones nuevas), 47 FKs y conteos
+  iguales a los de `nuevo_sistema`.
+- El dump contiene datos personales y hashes de contraseña: no versionarlo y borrarlo al terminar.
+- No cargar `TWILIO_*` ni `BREVO_*` en el destino mientras la madre siga activa (los crons envían mensajes reales).
+- Las contraseñas migradas son las de la madre (el hash se copia tal cual). Para cuentas de prueba, generar el hash
+  con `bcryptjs` (10 rondas), igual que `src/features/auth`.
+
 ## Políticas (`politicas/*.vars`, definidas en `gen_politica.py`)
 
 | Clave | Opciones (default primero) |
